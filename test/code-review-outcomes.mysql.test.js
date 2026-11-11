@@ -123,6 +123,11 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review outcomes on 
   });
   const posted = () =>
     requests.filter((r) => r.method === 'POST').map((r) => [r.url.split('/').pop(), r.body.state]);
+  const statusOf = (row) => ({
+    sha: row.headSha,
+    state: row.statusState,
+    description: row.statusDescription,
+  });
   const refresh = async (project, prNumber, options = {}) => {
     const { outcome, published } = await refreshReviewOutcome(project, prNumber, {
       cfg,
@@ -695,7 +700,12 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review outcomes on 
       recomputeAt: null,
       publishedConfirmed: false,
     });
-    await recordCodeReviewStatusFailed(repo, 52, { error: 'x'.repeat(3000), status: 502, retryAt: 5_000 });
+    await recordCodeReviewStatusFailed(
+      repo,
+      52,
+      { error: 'x'.repeat(3000), status: 502, retryAt: 5_000 },
+      statusOf(await getCodeReviewOutcome(repo, 52)),
+    );
     const failed = await getCodeReviewOutcome(repo, 52);
     expect(failed.publishError).toHaveLength(2000);
     expect(failed).toMatchObject({ publishErrorStatus: 502, publishAttempts: 1 });
@@ -704,7 +714,12 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review outcomes on 
     expect(failed.publishOwedAt).toBeTruthy();
     // The longest-failing first, and for the sweep only what is due.
     await refresh(off, 53);
-    await recordCodeReviewStatusFailed(repo, 53, { error: 'later', retryAt: 9_000 });
+    await recordCodeReviewStatusFailed(
+      repo,
+      53,
+      { error: 'later', retryAt: 9_000 },
+      statusOf(await getCodeReviewOutcome(repo, 53)),
+    );
     expect((await listFailedCodeReviewStatuses()).map((r) => r.prNumber)).toEqual([52, 53]);
     expect((await listFailedCodeReviewStatuses({ limit: 1 })).map((r) => r.prNumber)).toEqual([52]);
     const due = async (now) => (await listCodeReviewOutcomesDue({ now })).map((r) => r.prNumber);
@@ -713,7 +728,12 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review outcomes on 
     expect(await due(9_000)).toEqual([52, 53]);
     expect((await listCodeReviewOutcomesDue({ now: 9_000, limit: 1 })).map((r) => r.prNumber)).toEqual([52]);
     // A refusal that asking again cannot change: the failure stays, the debt goes.
-    await recordCodeReviewStatusFailed(repo, 52, { error: 'No commit found', status: 422, retryAt: null });
+    await recordCodeReviewStatusFailed(
+      repo,
+      52,
+      { error: 'No commit found', status: 422, retryAt: null },
+      statusOf(await getCodeReviewOutcome(repo, 52)),
+    );
     expect(await getCodeReviewOutcome(repo, 52)).toMatchObject({
       publishAttempts: 2,
       publishErrorStatus: 422,
@@ -1171,6 +1191,108 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review outcomes on 
       [earlier.id, late].sort(),
     );
   });
+
+  it.each(['head', 'state', 'description'])(
+    'starts fresh status retries when the owed %s changes, preserving retries when it does not',
+    async (change) => {
+      const next = {
+        outcome: 'passed',
+        stale: false,
+        reasons: [],
+        headSha: sha('a'),
+        baseRef: 'main',
+        statusState: 'success',
+        statusDescription: 'Review passed',
+        owed: true,
+      };
+      const store = () => refreshCodeReviewOutcome(repo, 80, {}, () => next);
+      await store();
+      const attempted = statusOf(await getCodeReviewOutcome(repo, 80));
+      for (let i = 0; i < 5; i++)
+        await recordCodeReviewStatusFailed(
+          repo,
+          80,
+          { error: 'No commit', status: 422, retryAt: null },
+          attempted,
+        );
+      await store();
+      expect((await getCodeReviewOutcome(repo, 80)).publishAttempts).toBe(5);
+      if (change === 'head') next.headSha = sha('b');
+      if (change === 'state') next.statusState = 'failure';
+      if (change === 'description') next.statusDescription = 'Review Passed';
+      await store();
+      expect(await getCodeReviewOutcome(repo, 80)).toMatchObject({
+        publishAttempts: 0,
+        publishFailedAt: null,
+        publishRetryAt: null,
+        publishError: null,
+        publishErrorStatus: null,
+      });
+      answers.push(new Response('{}', { status: 422 }));
+      expect(await publishReviewStatus(on, 80, { cfg, retryDelayMs: 0, now: () => 0 })).toMatchObject({
+        published: false,
+      });
+      expect(await getCodeReviewOutcome(repo, 80)).toMatchObject({
+        publishAttempts: 1,
+        publishRetryAt: new Date(60_000).toISOString(),
+        publishOwedAt: expect.any(String),
+      });
+      await dropCodeReviewStatusDebt(repo, 80);
+    },
+  );
+
+  it.each([null, 90_000])(
+    'keeps a newer status’s debt and retry history when an older write fails (retry %s)',
+    async (retryAt) => {
+      const next = {
+        outcome: 'passed',
+        stale: false,
+        reasons: [],
+        headSha: sha('a'),
+        baseRef: 'main',
+        statusState: 'success',
+        statusDescription: 'Review passed',
+        owed: true,
+      };
+      await refreshCodeReviewOutcome(repo, 81, {}, () => next);
+      const attempted = statusOf(await getCodeReviewOutcome(repo, 81));
+      next.statusState = 'failure';
+      await refreshCodeReviewOutcome(repo, 81, {}, () => next);
+      const newer = await getCodeReviewOutcome(repo, 81);
+      // The old HTTP request completes after the new outcome commits, before its own
+      // queued publication can run (or before a restart). It cannot drop that debt.
+      await recordCodeReviewStatusFailed(repo, 81, { error: 'No commit', status: 422, retryAt }, attempted);
+      expect(await getCodeReviewOutcome(repo, 81)).toEqual(newer);
+      expect((await listCodeReviewOutcomesDue({ now: Date.now() })).some((r) => r.prNumber === 81)).toBe(
+        true,
+      );
+      await dropCodeReviewStatusDebt(repo, 81);
+    },
+  );
+
+  it.each(['Review passed', 'réview passed', 'review passed '])(
+    'compares status descriptions byte for byte when settling debt (%s)',
+    async (description) => {
+      await refreshCodeReviewOutcome(repo, 82, {}, () => ({
+        outcome: 'passed',
+        stale: false,
+        reasons: [],
+        headSha: sha('a'),
+        baseRef: 'main',
+        statusState: 'success',
+        statusDescription: 'review passed',
+        owed: true,
+      }));
+      const current = statusOf(await getCodeReviewOutcome(repo, 82));
+      const older = { ...current, description };
+      await recordCodeReviewStatusPublished(repo, 82, older);
+      expect((await getCodeReviewOutcome(repo, 82)).publishOwedAt).toBeTruthy();
+      await recordCodeReviewStatusFailed(repo, 82, { error: 'No commit', status: 422, retryAt: null }, older);
+      expect((await getCodeReviewOutcome(repo, 82)).publishOwedAt).toBeTruthy();
+      await recordCodeReviewStatusPublished(repo, 82, current);
+      expect((await getCodeReviewOutcome(repo, 82)).publishOwedAt).toBeNull();
+    },
+  );
 
   it('rolls back to the earlier schema and comes back up with nothing passed', async () => {
     // A review whose findings some of the decisions below were given by.

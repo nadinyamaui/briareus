@@ -859,7 +859,7 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('the security review on M
     expect(await getCodeReviewSecurity(repo, 74)).toMatchObject({ result: 'incomplete', blocking: true });
   });
 
-  it('recomputes the outcomes of a project’s open pull requests when its settings change', async () => {
+  it('recomputes all stored outcomes of a project when its settings change', async () => {
     carried.clear();
     requests.length = 0;
     const on = { ...off, enforceReviewOutcome: true };
@@ -870,13 +870,16 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('the security review on M
     }
     expect(await listCodeReviewOutcomesDue({ now: Date.now() })).toEqual([]);
     // The project is switched to `required`. 80 and 81 are open; 82 was merged; 83 is
-    // open and was never reviewed, so it has no outcome to recompute.
-    expect(await oweProjectOutcomes(enforcing, { openPulls: async () => [80, 81, 83] })).toBe(2);
+    // open and was never reviewed, so it has no outcome to recompute; the board is not consulted.
+    expect(await oweProjectOutcomes(enforcing)).toBeGreaterThanOrEqual(3);
     const due = await listCodeReviewOutcomesDue({ now: Date.now() });
-    expect(due.map((row) => [row.repo, row.prNumber, !!row.recomputeAt])).toEqual([
-      [repo, 80, true],
-      [repo, 81, true],
-    ]);
+    expect(due.map((row) => [row.repo, row.prNumber, !!row.recomputeAt])).toEqual(
+      expect.arrayContaining([
+        [repo, 80, true],
+        [repo, 81, true],
+        [repo, 82, true],
+      ]),
+    );
     // Marked once, however often the project is saved before the sweep runs.
     const since = due.map((row) => row.recomputeAt);
     expect(await markRepoCodeReviewOutcomesStale(repo, [80, 81])).toBe(2);
@@ -885,13 +888,16 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('the security review on M
     );
     expect(await markRepoCodeReviewOutcomesStale(repo, [])).toBe(0);
     expect(await markRepoCodeReviewOutcomesStale('acme/other', null)).toBe(0);
-    // The sweep pays it: nothing touched either pull request, and both lose their pass.
+    // The sweep pays it: every stored outcome follows the new policy.
     const swept = await retryReviewStatuses({ getProject: () => enforcing, cfg, retryDelayMs: 0 });
-    expect(swept).toEqual([
-      { repo, prNumber: 80, published: true },
-      { repo, prNumber: 81, published: true },
-    ]);
-    for (const prNumber of [80, 81]) {
+    expect(swept).toEqual(
+      expect.arrayContaining([
+        { repo, prNumber: 80, published: true },
+        { repo, prNumber: 81, published: true },
+        { repo, prNumber: 82, published: true },
+      ]),
+    );
+    for (const prNumber of [80, 81, 82]) {
       expect(await getCodeReviewOutcome(repo, prNumber)).toMatchObject({
         outcome: 'incomplete',
         securityPolicy: 'required',
@@ -906,19 +912,13 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('the security review on M
       [sha('c'), 'error'],
       [sha('c'), 'error'],
     ]);
-    // The merged one is as it was.
-    expect(await getCodeReviewOutcome(repo, 82)).toMatchObject({ outcome: 'passed', securityPolicy: 'off' });
+    // A closed PR also gets a harmless refresh rather than trusting the board's list.
+    expect(await getCodeReviewOutcome(repo, 82)).toMatchObject({
+      outcome: 'incomplete',
+      securityPolicy: 'required',
+    });
     expect(await listCodeReviewOutcomesDue({ now: Date.now() })).toEqual([]);
-    // When the open ones cannot be listed, every outcome of the repository is marked.
-    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
-    try {
-      const every = await oweProjectOutcomes(on, {
-        openPulls: async () => Promise.reject(new Error('down')),
-      });
-      expect(every).toBeGreaterThanOrEqual(3);
-    } finally {
-      logged.mockRestore();
-    }
+    expect(await oweProjectOutcomes(on)).toBeGreaterThanOrEqual(3);
     const again = await listCodeReviewOutcomesDue({ now: Date.now() });
     expect(again.map((row) => row.prNumber)).toEqual(expect.arrayContaining([80, 81, 82]));
     await retryReviewStatuses({ getProject: () => on, cfg, retryDelayMs: 0 });

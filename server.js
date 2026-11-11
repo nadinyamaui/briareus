@@ -22,7 +22,7 @@ import { operationsRoutes } from './lib/operations-routes.js';
 import { createMobileAuth } from './lib/mobile-auth.js';
 import { createUsers } from './lib/users.js';
 import { createShares } from './lib/shares.js';
-import { seesSession } from './lib/ownership.js';
+import { seesSession, managesSession } from './lib/ownership.js';
 import { createUserCredentials } from './lib/user-credentials.js';
 import { createWhatsAppOwners } from './lib/whatsapp-owners.js';
 import { meRoutes } from './lib/me-routes.js';
@@ -94,7 +94,7 @@ import { maintenanceState } from './lib/recovery.js';
 import { workerTranscript } from './lib/worker-transcript.js';
 import { orchestratorRoutes } from './lib/orchestrator-routes.js';
 import {
-  initDb,
+  waitForDb,
   dbHealthy,
   loadTaskSessions,
   loadJobTurnUsage,
@@ -600,14 +600,10 @@ api.put('/api/projects/order', async (req, res) => {
 });
 
 // A save that changes what a project's review outcomes are computed from (its security
-// policy, its approval policy, whether it enforces the outcome, its round limit) marks the outcomes of its open
-// pull requests as owed, and the sweep below computes and publishes them again. The
-// board is cached and mirrored, so listing them costs no GitHub call on an ordinary save.
-onOutcomeSettingsChange((project) =>
-  oweProjectOutcomes(project, {
-    openPulls: async (saved) => (await projectPulls(saved)).pulls.map((pr) => pr.number),
-  }),
-);
+// policy, its approval policy, whether it enforces the outcome, its round limit) marks every
+// stored outcome, so a cold or stale board neither delays project edits nor leaves a reviewed
+// pull request computed under the previous settings; the sweep below computes them again.
+onOutcomeSettingsChange((project) => oweProjectOutcomes(project));
 
 api.put('/api/projects/:id', async (req, res) => {
   try {
@@ -824,6 +820,10 @@ api.use(
     // pass the server saw complete on the head it reviews, and publishes a finding of
     // that pass only if the coverage kept with it lists one.
     securityPass: async (review) => securityCoverageOf(await listCodeReviewStages(review.id), review.headSha),
+    refresh: async (review) => {
+      const project = getProject(review.repo);
+      if (project) await refreshReviewOutcome(project, review.prNumber, { cfg: getConfig() });
+    },
   }),
 );
 api.use(
@@ -1043,9 +1043,10 @@ api.use(
     sshVisible: sshRuledBy,
     // A PR is open while the board lists it; the board is cached and mirrored, so this
     // costs no GitHub call on an ordinary poll.
-    reviewLimits: () =>
+    reviewLimits: (repos) =>
       reviewLimitsWaiting({
         getProject,
+        repos,
         isOpen: async (project, prNumber) =>
           (await projectPulls(project)).pulls.some((pr) => pr.number === prNumber),
       }),
@@ -1199,9 +1200,25 @@ api.delete('/api/agent/memories/:name', async (req, res) => {
 //
 // The worker tools an orchestrator's turns mount (lib/orchestrator-mcp.js, or curl for CLIs
 // without a headless MCP flag). The bearer token's whole authority is "this orchestrator and
-// its own workers".
+// its own workers", plus closing the sessions of its own project its owner could close.
 
+// Whether an orchestrator's owner could close a session from a client (lib/ownership.js),
+// while they still hold the project. One nobody started works as the admins'.
+const ownerManages = (orchestrator, job) => {
+  const project = getProject(orchestrator.repo);
+  if (!project || !sessionMayUse(orchestrator, 'project', project.id)) return false;
+  if (orchestrator.ownerId == null) return true;
+  try {
+    return managesSession(users.get(orchestrator.ownerId), job);
+  } catch {
+    return false;
+  }
+};
 const workerRoutes = orchestratorRoutes({
+  getJob,
+  ownerManages,
+  closeDevSession,
+  noteSession,
   assertWorkerSlot,
   reopenDevSession,
   deleteJobById,
@@ -1245,25 +1262,14 @@ api.post('/api/agent/sessions/:id/message', (req, res) => {
   try {
     // Reopening a closed worker is effectively a spawn, so the open-worker cap applies.
     if (!DEV_OPEN.includes(worker.status)) assertWorkerSlot(orchestrator);
-    sendDevMessage(worker.id, String((req.body || {}).text || ''));
+    sendDevMessage(worker.id, String((req.body || {}).text || ''), undefined, { fromAgent: true });
     res.json({ session: workerSummary(worker) });
   } catch (e) {
     res.status(400).json({ error: e.message });
   }
 });
 
-api.post('/api/agent/sessions/:id/close', async (req, res) => {
-  const orchestrator = orchestratorSession(req, res);
-  if (!orchestrator) return;
-  const worker = workerOf(req, res, orchestrator);
-  if (!worker) return;
-  try {
-    await closeDevSession(worker.id);
-    res.json({ session: workerSummary(worker) });
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
+api.post('/api/agent/sessions/:id/close', workerRoutes.closeSession);
 
 function pullRequestParams(body) {
   const project = getProject(String(body.repo || ''));
@@ -2480,11 +2486,13 @@ const cfg = getConfig();
 const portFlag = process.argv.indexOf('--port');
 const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
 
-// Load projects and sessions (database-only) before serving. A down database gets one clear log
-// line, and the server still comes up so settings can show what is wrong.
+// Load projects and sessions (database-only) before serving. A database that is still starting is
+// retried, with a log line per attempt, for up to DB_BOOT_WAIT_SECONDS before HTTP is served; past
+// that, or on an error retrying cannot fix, the server comes up without it so settings can show
+// what is wrong.
 (async () => {
   try {
-    await initDb();
+    await waitForDb();
     await users.init().catch((e) => console.error('Could not load users:', e.message));
     await initTemplates();
     await initProjects();

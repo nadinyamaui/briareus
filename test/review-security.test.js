@@ -464,6 +464,23 @@ describe('the security result', () => {
     }
   });
 
+  it('reports no required pass for an off policy when the stage never ran', () => {
+    for (const status of ['completed', 'failed', 'running']) {
+      const r = result({
+        policy: 'off',
+        review: review({ status }),
+        stages: stagesAt(head, { security: { status: 'pending', headSha: null, detail: null } }),
+      });
+      expect(r).toMatchObject({ result: 'not_required', blocking: false, stage: 'pending', coverage: null });
+      expect(r.reasons).toEqual([]);
+    }
+    for (const policy of ['advisory', 'required']) {
+      const r = result({ policy, stages: stagesAt(head, { security: { status: 'pending', detail: null } }) });
+      expect(r.result).toBe('incomplete');
+      expect(codes(r)).toEqual(['stage_not_run']);
+    }
+  });
+
   it('is not run, never passed, when the policy asks for a pass the review ran without', () => {
     const withoutPass = stagesAt(head).filter((s) => s.stage !== 'security');
     for (const policy of ['advisory', 'required']) {

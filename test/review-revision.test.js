@@ -867,7 +867,7 @@ describe('the risk the server reads for a revision', () => {
     expect(before.approvals.risk).toMatchObject({ unknown: true, tier: 'high' });
     expect(before.approvals.risk.reasons[0].why).toBe('policy_changed');
     // A save of the setting marks the outcome owed, and the sweep pays it.
-    await enforcement.oweProjectOutcomes(stricter, { openPulls: async () => [7] });
+    await enforcement.oweProjectOutcomes(stricter);
     await sweep(stricter);
     expect(asked('/pulls/7/files')).toHaveLength(2);
     expect(store.readiness).toMatchObject({ tier: 'high', required: 2 });

@@ -29,7 +29,7 @@ it('loads core services even when WhatsApp account discovery fails', async () =>
     console: { error: vi.fn() },
   };
   for (const name of [
-    'initDb',
+    'waitForDb',
     'initTemplates',
     'initProjects',
     'initSavedPrompts',

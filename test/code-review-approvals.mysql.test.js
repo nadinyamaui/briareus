@@ -854,7 +854,7 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('risk-based approvals on 
     refuse = ['briareus/approvals', 'briareus/code-review'];
     await refresh(enforcing, 24, { current: { headSha: sha('a'), baseRef: 'main' } });
     refuse = [];
-    await oweProjectOutcomes(enforcing, { openPulls: async () => [24] });
+    await oweProjectOutcomes(enforcing);
     expect((await getCodeReviewOutcome(repo, 24)).recomputeAt).toBeTruthy();
     await dropCodeReviewStatusDebt(repo, 24, 'approvals');
     expect(await getCodeReviewReadiness(repo, 24)).toMatchObject({
@@ -885,7 +885,8 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('risk-based approvals on 
       unknown: true,
       tier: 'high',
     });
-    expect(await oweProjectOutcomes(stricter, { openPulls: async () => [25] })).toBe(1);
+    // Every stored outcome of the repository is marked; the board is not consulted.
+    expect(await oweProjectOutcomes(stricter)).toBeGreaterThanOrEqual(1);
     await retryReviewStatuses({ getProject: () => stricter, cfg, retryDelayMs: 0 });
     expect(await getCodeReviewReadiness(repo, 25)).toMatchObject({ tier: 'high', required: 2 });
     expect((await getCodeReviewRisk(repo, 25)).policyHash).toBe(policyFingerprint(stricter.approvalPolicy));

@@ -94,11 +94,16 @@ vi.mock('../lib/db.js', () => ({
   listCodeReviewDecisions: vi.fn(async (repo, prNumber) =>
     store.decisions.filter((d) => d.repo === repo && d.prNumber === prNumber),
   ),
-  listPullCodeReviews: vi.fn(async (repo, prNumber, limit) =>
-    store.reviews.filter((r) => r.repo === repo && r.prNumber === prNumber).slice(0, limit),
+  listPullCodeReviews: vi.fn(async (repo, prNumber, limit, { completed = false } = {}) =>
+    store.reviews
+      .filter((r) => r.repo === repo && r.prNumber === prNumber)
+      .filter((r) => !completed || r.status === 'completed')
+      .slice(0, limit),
   ),
-  listRefusedCodeReviewRounds: vi.fn(async () =>
-    [...store.pulls.values()].filter((p) => p.count.refusedAt).map((p) => ({ ...p.count })),
+  listRefusedCodeReviewRounds: vi.fn(async ({ repos = null } = {}) =>
+    [...store.pulls.values()]
+      .filter((p) => p.count.refusedAt && (!repos || repos.includes(p.count.repo)))
+      .map((p) => ({ ...p.count })),
   ),
   codeReviewDecisionsSince: vi.fn(async () => Date.UTC(2026, 10, 1)),
 }));
@@ -124,7 +129,7 @@ import {
   settledClaims,
   unresolvedWork,
 } from '../lib/review-rounds.js';
-import { claimCodeReviewRound, listCodeReviewDecisions } from '../lib/db.js';
+import { claimCodeReviewRound, listCodeReviewDecisions, listPullCodeReviews } from '../lib/db.js';
 
 const repo = 'acme/shop';
 const sha = (letter) => letter.repeat(40);
@@ -847,6 +852,16 @@ describe('how current the unresolved work is', () => {
     }),
   ];
 
+  it('takes the latest review’s findings from a caller that already read them', async () => {
+    await useUp();
+    store.decisions = asRoundThreeLeftIt();
+    vi.mocked(listPullCodeReviews).mockClear();
+    const findings = [{ findingRef: 'r9', shouldFix: null, title: 'Never published' }];
+    const view = await readReviewRounds(project, 7, { findings });
+    expect(view.unresolved.unverified.map((f) => f.findingRef)).toEqual(['r3', 'r9']);
+    expect(listPullCodeReviews).not.toHaveBeenCalled();
+  });
+
   it('dates the stored state by the last review that read the threads', async () => {
     await useUp();
     store.decisions = asRoundThreeLeftIt();
@@ -1035,6 +1050,79 @@ describe('what waits on a person', () => {
         asOf: { source: 'stored', round: 3, headSha: sha('c'), at: '2026-11-10T10:00:00.000Z', error: null },
       },
     ]);
+  });
+
+  it('counts what the latest review left without a verdict or a thread, as the refusal does', async () => {
+    await useUp();
+    await refusalOf(claim({ headSha: sha('d'), jobId: 'job-d' }));
+    store.decisions = [decision({ findingRef: 'r1', threadId: 'T1', verdict: 'fix' })];
+    store.reviews = [
+      // The refused session's own row is newer, and holds no findings of its own.
+      { repo, prNumber: 7, status: 'failed', findings: [] },
+      {
+        repo,
+        prNumber: 7,
+        status: 'completed',
+        findings: [
+          { findingRef: 'r1', shouldFix: null, title: 'Has its decision' },
+          { findingRef: 'r9', shouldFix: null, title: 'Never published' },
+        ],
+      },
+    ];
+    const [waiting] = await reviewLimitsWaiting({ getProject });
+    expect(waiting).toMatchObject({ fix: 1, unverified: 1 });
+    const view = await readReviewRounds(projects[0], 7);
+    expect(view.unresolved.unverified.map((f) => f.findingRef)).toEqual(['r9']);
+    store.reviews[0].status = 'running';
+    const refused = await refusalOf(claim({ headSha: sha('e'), jobId: 'job-e' }));
+    expect(refused.reviewRounds.unresolved.unverified.map((f) => f.findingRef)).toEqual(['r9']);
+  });
+
+  it('filters scope and closed PRs before loading any review details', async () => {
+    await useUp();
+    await refusalOf(claim({ headSha: sha('d') }));
+    await useUp(8);
+    await refusalOf(claim({ prNumber: 8, headSha: sha('d') }));
+    store.pulls.set('acme/site#9', {
+      count: { repo: 'acme/site', prNumber: 9, rounds: 3, refusedAt: store.now() },
+      rounds: [],
+    });
+    listCodeReviewDecisions.mockClear();
+    listPullCodeReviews.mockClear();
+    const isOpen = vi.fn(async (_project, prNumber) => prNumber === 7);
+    const waiting = await reviewLimitsWaiting({ getProject, isOpen, repos: [repo] });
+    expect(waiting.map((r) => r.prNumber)).toEqual([7]);
+    expect(isOpen.mock.calls.map(([, number]) => number)).toEqual([7, 8]);
+    expect(listCodeReviewDecisions.mock.calls).toEqual([[repo, 7]]);
+    expect(listPullCodeReviews.mock.calls).toEqual([[repo, 7, 1, { completed: true }]]);
+    isOpen.mockClear();
+    expect(await reviewLimitsWaiting({ getProject, isOpen, repos: [] })).toEqual([]);
+    expect(isOpen).not.toHaveBeenCalled();
+  });
+
+  it('bounds concurrent attention reads while preserving the refused PR order', async () => {
+    for (let prNumber = 1; prNumber <= 8; prNumber++) {
+      await useUp(prNumber);
+      await refusalOf(claim({ prNumber, headSha: sha('d') }));
+    }
+    let active = 0,
+      peak = 0;
+    const read = listCodeReviewDecisions.getMockImplementation();
+    listCodeReviewDecisions.mockImplementation(async (...args) => {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setImmediate(resolve));
+      active--;
+      return read(...args);
+    });
+    try {
+      const waiting = await reviewLimitsWaiting({ getProject });
+      expect(waiting.map((r) => r.prNumber)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+      expect(peak).toBeLessThanOrEqual(2);
+      expect(waiting).toHaveLength(8);
+    } finally {
+      listCodeReviewDecisions.mockImplementation(read);
+    }
   });
 
   it('stops listing one that was continued, closed, raised above its count or removed', async () => {

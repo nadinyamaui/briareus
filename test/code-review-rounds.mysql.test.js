@@ -247,6 +247,10 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review rounds on My
     expect((await getCodeReviewRounds(repo, 7)).rounds[0].status).toBe('completed');
     const [stored] = await listPullCodeReviews(repo, 7, 1);
     expect(stored).toMatchObject({ jobId: 'job-a2', round: 1, scope: 'full', scopeReason: 'first_review' });
+    // A newer session's row that has not finished is left out of the finished reviews.
+    await createCodeReview({ jobId: 'job-a3', repo, prNumber: 7, branch: 'feature', headSha: sha('b') });
+    expect((await listPullCodeReviews(repo, 7, 1))[0].jobId).toBe('job-a3');
+    expect((await listPullCodeReviews(repo, 7, 1, { completed: true }))[0].jobId).toBe('job-a2');
     // The session and its review are deleted; the pull request's count is not theirs.
     await pool.query('DELETE FROM `code_reviews` WHERE `repo` = ? AND `pr_number` = ?', [repo, 7]);
     const { count, rounds } = await getCodeReviewRounds(repo, 7);
@@ -285,6 +289,12 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review rounds on My
     expect((await listRefusedCodeReviewRounds()).map((r) => `${r.repo}#${r.prNumber}`)).toEqual([
       `${repo}#7`,
     ]);
+    // A reader scoped to other repositories gets none of it, before the limit is applied.
+    expect(await listRefusedCodeReviewRounds({ repos: ['acme/other'], limit: 1 })).toEqual([]);
+    expect(await listRefusedCodeReviewRounds({ repos: [] })).toEqual([]);
+    expect(
+      (await listRefusedCodeReviewRounds({ repos: [repo, 'acme/other'] })).map((r) => r.prNumber),
+    ).toEqual([7]);
     // A plain request from a person is refused too; an admitted continuation claims nothing yet.
     expect(await outcome(claim({ headSha: sha('f'), jobId: 'job-f', source: 'user' }))).toBe(
       'review_round_limit',
