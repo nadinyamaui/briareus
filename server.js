@@ -46,9 +46,12 @@ import {
   readReviewOutcome,
   refreshReviewOutcome,
   retryReviewStatuses,
+  oweProjectOutcomes,
   reviewFindingsFrozen,
+  reviewSecurity,
   reviewStatusFailures,
 } from './lib/review-enforcement.js';
+import { securityCoverageOf } from './lib/review-security.js';
 import { createSshResourceMonitor } from './lib/ssh-resource-monitor.js';
 import { sshTelemetryRoutes } from './lib/ssh-telemetry-routes.js';
 import { createSlackService } from './lib/slack.js';
@@ -229,6 +232,7 @@ import {
   createProject,
   updateProject,
   editProject,
+  onOutcomeSettingsChange,
   removeProject,
   reorderProjects,
   PROJECT_DEFAULTS,
@@ -565,6 +569,10 @@ api.put('/api/projects/order', async (req, res) => {
   }
 });
 
+// Mark every stored outcome so a cold or stale board neither delays project edits
+// nor leaves a reviewed pull request computed under the previous settings.
+onOutcomeSettingsChange((project) => oweProjectOutcomes(project));
+
 api.put('/api/projects/:id', async (req, res) => {
   try {
     const project = await updateProject(Number(req.params.id), req.body || {});
@@ -776,6 +784,10 @@ api.use(
         session: getJob(review.jobId),
         listStages: listCodeReviewStages,
       }),
+    // A finding counts towards the security result only in a review whose security
+    // pass the server saw complete on the head it reviews, and publishes a finding of
+    // that pass only if the coverage kept with it lists one.
+    securityPass: async (review) => securityCoverageOf(await listCodeReviewStages(review.id), review.headSha),
     refresh: async (review) => {
       const project = getProject(review.repo);
       if (project) await refreshReviewOutcome(project, review.prNumber, { cfg: getConfig() });
@@ -806,6 +818,7 @@ api.use(
       refresh: async (project, prNumber) =>
         (await refreshReviewOutcome(project, prNumber, { cfg: getConfig() })).outcome,
     },
+    security: reviewSecurity,
   }),
 );
 api.use(

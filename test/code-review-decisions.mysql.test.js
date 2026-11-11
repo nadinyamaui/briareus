@@ -101,6 +101,8 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review decisions on
       'rationale',
       // Added by the review outcome's migration, which follows this one at boot.
       'verification',
+      // And by the security review's, which follows that.
+      'security',
       'source',
       'decided_by',
       'head_sha',

@@ -382,6 +382,18 @@ unverified with no finding to change is settled with
 `PATCH /pulls/{number}/code-review-decisions/{decisionId}`. See
 [Review outcome](features.md#review-outcome).
 
+With the project’s `securityReview` set to `advisory` or `required`, every review
+also runs a security pass, and `reviewOutcome.security` carries its result:
+`not_required`, `not_run`, `pending`, `incomplete`, `failed` or `passed`, with its
+`reasons`, the `coverage` record of the risk categories it assessed and whether it
+is `blocking`. Each stored review has its own under `security`, a finding or a
+decision that counts towards it has `security` true, and a finding that publishes
+one of the pass’s recorded findings names it in `securityEntry`. A security
+finding verified as `fix` blocks the outcome under every policy; a pass that did
+not run or did not complete blocks only under `required`, where a result other
+than `passed` appears among the outcome’s reasons as `requirement_unmet` with
+`requirement` `security`. See [Security review](features.md#security-review).
+
 ## Pull request data
 
 To bring a PR branch up to date with its base, call

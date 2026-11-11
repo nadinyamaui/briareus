@@ -87,6 +87,8 @@ vi.mock('../lib/db.js', () => ({
       computedAt: store.now(),
       recomputeAt: null,
       publishOwedAt: owed ? store.row.publishOwedAt || store.now() : null,
+      // The security result is stored with the outcome; a read joins its policy.
+      securityPolicy: next.security?.policy ?? null,
     });
     return { ...state, row: { ...store.row } };
   }),
@@ -94,6 +96,12 @@ vi.mock('../lib/db.js', () => ({
   markCodeReviewOutcomeStale: vi.fn(async () => {
     store.fail('stale');
     if (store.row) store.row.recomputeAt ||= store.now();
+  }),
+  // A setting of the project changed: the rows of these pull requests owe a recomputation.
+  markRepoCodeReviewOutcomesStale: vi.fn(async (_repo, prNumbers = null) => {
+    if (!store.row || (prNumbers && !prNumbers.includes(store.row.prNumber))) return 0;
+    store.row.recomputeAt ||= store.now();
+    return 1;
   }),
   markCodeReviewStatusSending: vi.fn(async () => {
     store.row.publishedConfirmed = false;
@@ -156,6 +164,7 @@ vi.mock('../lib/db.js', () => ({
 
 import {
   dropCodeReviewStatusDebt,
+  markRepoCodeReviewOutcomesStale,
   recordCodeReviewStatusFailed,
   refreshCodeReviewOutcome,
 } from '../lib/db.js';
@@ -1232,6 +1241,564 @@ describe('a pull request seen at another revision', () => {
     const moved = await enforcement.noteReviewedRevision(off, 7, { headSha: next, baseRef: 'main' }, { cfg });
     expect(moved.outcome).toMatchObject({ outcome: 'pending', stale: true, enforced: false });
     expect(fetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('the security result beside the outcome', () => {
+  const advisory = { ...off, securityReview: 'advisory' };
+  const required = { ...off, securityReview: 'required' };
+  const enforcing = { ...on, securityReview: 'required' };
+  const categories = (count = 0) => ({
+    categories: ['permissions', 'secrets', 'isolation', 'execution', 'untrusted_input', 'dependencies'].map(
+      (id) => ({
+        id,
+        applicable: id === 'execution',
+        assessment: 'Traced the changed handler and what it calls.',
+        findings: id === 'execution' ? count : 0,
+      }),
+    ),
+    findings: count,
+    // Each recorded finding under the id the server gave it.
+    entries: Array.from({ length: count }, (_, i) => ({
+      id: i + 1,
+      category: 'execution',
+      severity: 'high',
+      title: `Recorded finding ${i + 1}`,
+      filePath: null,
+      startLine: null,
+      claim: null,
+    })),
+    claims: [],
+    widened: null,
+  });
+  const pass = (over = {}) => ({
+    codeReviewId: 5,
+    stage: 'security',
+    headSha: head,
+    status: 'completed',
+    detail: { coverage: categories() },
+    startedAt: '2026-11-10T11:01:00.000Z',
+    endedAt: '2026-11-10T11:02:00.000Z',
+    ...over,
+  });
+  // A review that ran to its end, with a security pass as recorded.
+  const withPass = (over = {}) => {
+    reviewed();
+    store.stages = [store.stages[0], pass(over), ...store.stages.slice(1)];
+  };
+  const read = (project, options) => enforcement.readReviewOutcome(project, 7, options);
+
+  it('changes nothing for a project that never asked for a pass', async () => {
+    reviewed();
+    store.findings = [finding()];
+    const { outcome } = await refresh(off);
+    expect(outcome.outcome).toBe('passed');
+    expect(outcome.reasons).toEqual([]);
+    expect(outcome.security).toEqual({
+      policy: 'off',
+      result: 'not_required',
+      blocking: false,
+      stale: false,
+      reasons: [],
+      reviewId: 5,
+      headSha: head,
+      stage: null,
+      coverage: null,
+      counts: { findings: 0, fix: 0, optional: 0, dismissed: 0, suppressed: 0, unverified: 0 },
+    });
+    expect(store.row.security).toMatchObject({ policy: 'off', result: 'not_required' });
+    expect(outcome.status.description).toBe('Review passed at aaaaaaa: 1 optional, nothing to fix');
+  });
+
+  it('is tracked and shown under advisory, and never holds the outcome back', async () => {
+    // The pass ran to its end and passed.
+    withPass();
+    const passed = (await refresh(advisory)).outcome;
+    expect(passed.outcome).toBe('passed');
+    expect(passed.security).toMatchObject({
+      policy: 'advisory',
+      result: 'passed',
+      blocking: false,
+      stage: 'completed',
+      coverage: categories(),
+    });
+    // The stage is listed with the others, and is not one the outcome requires.
+    expect(passed.stages.map((s) => s.stage)).toEqual(['discover', 'security', 'publish', 'verify', 'label']);
+    // The pass failed, was interrupted, or left nothing: the outcome is what it was.
+    for (const over of [
+      { status: 'failed', detail: { error: 'The security pass left no record, or one that is not JSON' } },
+      { status: 'running', detail: null },
+      { status: 'pending', detail: null },
+      { detail: null },
+    ]) {
+      withPass(over);
+      const { outcome } = await refresh(advisory);
+      expect(outcome.outcome).toBe('passed');
+      expect(outcome.reasons).toEqual([]);
+      expect(outcome.status.state).toBe('success');
+      expect(outcome.security).toMatchObject({ result: 'incomplete', blocking: false });
+      expect(outcome.security.reasons).toHaveLength(1);
+    }
+    // And a review from before the policy reads as not run, still without blocking.
+    reviewed();
+    const before = (await refresh(advisory)).outcome;
+    expect(before.outcome).toBe('passed');
+    expect(before.security).toMatchObject({ result: 'not_run', blocking: false });
+  });
+
+  it('blocks the outcome under required when the pass is incomplete', async () => {
+    withPass({
+      status: 'failed',
+      detail: { error: 'The security pass left no record, or one that is not JSON' },
+    });
+    const { outcome, published } = await refresh(enforcing);
+    expect(outcome.outcome).toBe('incomplete');
+    expect(outcome.reasons).toEqual([
+      {
+        code: 'requirement_unmet',
+        effect: 'incomplete',
+        requirement: 'security',
+        message:
+          'The required security review is incomplete: The security pass failed: The security pass left no record, or one that is not JSON',
+      },
+    ]);
+    expect(outcome.security).toMatchObject({ policy: 'required', result: 'incomplete', blocking: true });
+    // The commit status follows from the outcome, with no rule of its own.
+    expect(published).toEqual({ published: true });
+    expect(posted()).toEqual([
+      {
+        sha: head,
+        state: 'error',
+        context: 'briareus/code-review',
+        description:
+          'Review incomplete: The required security review is incomplete: The security pass failed: The security pass left no record, or one that is n…',
+      },
+    ]);
+    // So does the reading the label step is given and held to.
+    store.review.status = 'running';
+    const provisional = await enforcement.provisionalReviewOutcome(enforcing, 7, { reviewId: 5 });
+    expect(provisional.outcome).toBe('incomplete');
+    expect(provisional.reasons[0]).toMatchObject({ code: 'requirement_unmet', requirement: 'security' });
+  });
+
+  it('cannot pass a required project’s review in which the pass did not run', async () => {
+    reviewed();
+    store.findings = [finding()];
+    const { outcome } = await refresh(enforcing);
+    expect(outcome.outcome).toBe('incomplete');
+    expect(outcome.reasons.map((r) => [r.code, r.requirement])).toEqual([['requirement_unmet', 'security']]);
+    expect(outcome.reasons[0].message).toContain(
+      'The required security review did not run: The review of aaaaaaa ran without a security pass',
+    );
+    expect(outcome.security).toMatchObject({ result: 'not_run', blocking: true, stage: null });
+    expect(posted().at(-1)).toMatchObject({ sha: head, state: 'error' });
+  });
+
+  it('fails the pass on a standing security fix, which blocks like any required fix under every policy', async () => {
+    for (const project of [off, advisory, required]) {
+      withPass({ detail: { coverage: categories(1) } });
+      store.findings = [
+        finding({ security: true, securityEntry: 1, shouldFix: 'fix', title: 'Token logged' }),
+      ];
+      const { outcome } = await refresh(project);
+      expect(outcome.outcome).toBe('changes_required');
+      expect(outcome.security.result).toBe('failed');
+      expect(outcome.security.reasons).toEqual([
+        expect.objectContaining({ code: 'fix_required', effect: 'failed', title: 'Token logged' }),
+      ]);
+      // Only a project that requires the pass also hears it as a requirement.
+      expect(outcome.reasons.map((r) => r.code)).toEqual(
+        project === required ? ['fix_required', 'requirement_unmet'] : ['fix_required'],
+      );
+      expect(outcome.security.blocking).toBe(project === required);
+    }
+    expect(store.row.security).toMatchObject({ policy: 'required', result: 'failed', blocking: true });
+    expect(store.row.statusDescription).toBe('1 required fix at aaaaaaa');
+  });
+
+  it('passes a required project’s review once the pass and its findings are settled', async () => {
+    withPass({ detail: { coverage: categories(2) } });
+    store.findings = [
+      finding({ security: true, securityEntry: 1 }),
+      finding({
+        id: 2,
+        findingRef: 'ref-2',
+        commentId: 502,
+        threadId: 'PRRT_2',
+        security: true,
+        securityEntry: 2,
+        shouldFix: 'dismiss',
+      }),
+    ];
+    const { outcome } = await refresh(enforcing);
+    expect(outcome.outcome).toBe('passed');
+    expect(outcome.reasons).toEqual([]);
+    expect(outcome.security).toMatchObject({
+      result: 'passed',
+      blocking: false,
+      counts: { findings: 2, optional: 1, dismissed: 1 },
+    });
+    expect(posted().at(-1)).toMatchObject({ state: 'success' });
+    // An unproven dismissal of a security finding is incomplete for both.
+    store.findings[1].verification = 'plausible';
+    const unproven = (await refresh(enforcing)).outcome;
+    expect(unproven.outcome).toBe('incomplete');
+    expect(unproven.security.result).toBe('incomplete');
+    expect(unproven.security.reasons.map((r) => r.code)).toEqual(['dismissal_unproven']);
+    // And what the pass recorded has to have been registered, finding by finding.
+    store.findings = [finding({ security: true, securityEntry: 1 })];
+    const missing = (await refresh(enforcing)).outcome;
+    expect(missing.security.reasons.map((r) => r.code)).toEqual(['findings_missing']);
+    expect(missing.outcome).toBe('incomplete');
+  });
+
+  it('does not let a marked finding stand in for a recorded one that was never registered', async () => {
+    // The pass recorded one finding. Publication never registered it; it registered a
+    // finding of the provider's report as suppressed against an earlier dismissed security
+    // claim, which carries that claim's mark, and an unrelated one it marked itself.
+    withPass({ detail: { coverage: categories(1) } });
+    const at = '2026-11-10T10:00:00.000Z';
+    store.decisions = [
+      {
+        id: 1,
+        anchor: 'PRRT_old',
+        threadId: 'PRRT_old',
+        findingRef: 'old-dismissed',
+        title: 'Session id reaches the log',
+        verdict: 'dismiss',
+        rationale: 'Redacted in lib/log.js:12',
+        verification: 'confirmed',
+        security: true,
+        source: 'review',
+        resolved: true,
+        decidedAt: at,
+      },
+    ];
+    store.findings = [
+      finding({
+        id: 7,
+        findingRef: 'old-dismissed',
+        security: true,
+        reconciliation: 'suppressed',
+        commentId: null,
+        threadId: null,
+        shouldFix: 'dismiss',
+      }),
+      finding({ id: 8, findingRef: 'ref-nit', commentId: 508, threadId: 'PRRT_8', security: true }),
+    ];
+    const { outcome } = await refresh(enforcing);
+    expect(outcome.security.result).toBe('incomplete');
+    expect(outcome.security.reasons).toEqual([
+      expect.objectContaining({
+        code: 'findings_missing',
+        recorded: 1,
+        registered: 0,
+        entries: [{ id: 1, title: 'Recorded finding 1' }],
+      }),
+    ]);
+    expect(outcome.outcome).toBe('incomplete');
+    expect(posted().at(-1)).toMatchObject({ sha: head, state: 'error' });
+    expect(posted().map((p) => p.state)).not.toContain('success');
+    // Registered as the publication of that finding, it passes.
+    store.findings[1].securityEntry = 1;
+    const published = (await refresh(enforcing)).outcome;
+    expect(published.outcome).toBe('passed');
+    expect(published.security).toMatchObject({ result: 'passed', counts: { findings: 2, suppressed: 1 } });
+  });
+
+  it('does not read a pass that found nothing as passed when the review never published', async () => {
+    // The pass completed with its coverage and no finding; the publish step then failed.
+    withPass();
+    store.review.status = 'failed';
+    store.stages = store.stages.map((s) =>
+      s.stage === 'publish'
+        ? { ...s, status: 'failed', detail: { error: 'Codex entry exited with code 1' } }
+        : ['verify', 'label'].includes(s.stage)
+          ? { ...s, status: 'pending' }
+          : s,
+    );
+    const { outcome } = await refresh(advisory);
+    expect(outcome.outcome).toBe('incomplete');
+    expect(outcome.security.result).toBe('incomplete');
+    expect(outcome.security.reasons).toEqual([
+      expect.objectContaining({ code: 'publication_incomplete', effect: 'incomplete', recorded: 0 }),
+    ]);
+    expect(store.row.security).toMatchObject({ result: 'incomplete' });
+  });
+
+  it('does not take a resolved thread as proof that a security fix was made', async () => {
+    const fixRequired = (over = {}) => ({
+      id: 1,
+      anchor: 'PRRT_9',
+      threadId: 'PRRT_9',
+      findingRef: 'old-fix',
+      title: 'Token logged',
+      verdict: 'fix',
+      security: true,
+      source: 'review',
+      // Resolved after the fix was required: by the author, and then a push.
+      resolved: true,
+      decidedAt: '2026-11-10T10:00:00.000Z',
+      ...over,
+    });
+    // Round two's pass was clean and was never asked about the claim.
+    withPass();
+    store.decisions = [fixRequired()];
+    const unchecked = (await refresh(enforcing)).outcome;
+    expect(unchecked.security.result).toBe('incomplete');
+    expect(unchecked.security.reasons).toEqual([
+      expect.objectContaining({
+        code: 'security_fix_unchecked',
+        findingRef: 'old-fix',
+        title: 'Token logged',
+      }),
+    ]);
+    expect(unchecked.outcome).toBe('incomplete');
+    expect(unchecked.reasons.map((r) => [r.code, r.requirement])).toEqual([
+      ['requirement_unmet', 'security'],
+    ]);
+    expect(posted().at(-1)).toMatchObject({ state: 'error' });
+    // Under advisory it is shown and holds nothing back, like any incomplete pass.
+    expect((await refresh(advisory)).outcome).toMatchObject({
+      outcome: 'passed',
+      security: { result: 'incomplete', blocking: false },
+    });
+    // The pass confirmed the fix in the code it reviewed: settled.
+    const confirmed = {
+      ...categories(),
+      claims: [
+        { findingRef: 'old-fix', status: 'fixed', evidence: 'Redacted before logging, lib/log.js:12.' },
+      ],
+    };
+    withPass({ detail: { coverage: confirmed } });
+    const checked = (await refresh(enforcing)).outcome;
+    expect(checked.outcome).toBe('passed');
+    expect(checked.security).toMatchObject({ result: 'passed', reasons: [] });
+    expect(posted().at(-1)).toMatchObject({ state: 'success' });
+    // What `addressed` means for a finding that is not a security one has not changed.
+    withPass();
+    store.decisions = [fixRequired({ security: false })];
+    expect((await refresh(enforcing)).outcome).toMatchObject({
+      outcome: 'passed',
+      security: { result: 'passed' },
+    });
+  });
+
+  it('counts a security fix an earlier round left owed, by the mark its decision keeps', async () => {
+    withPass();
+    const at = '2026-11-10T10:00:00.000Z';
+    store.decisions = [
+      {
+        id: 1,
+        anchor: 'PRRT_9',
+        threadId: 'PRRT_9',
+        findingRef: 'old-1',
+        title: 'Token logged',
+        verdict: 'fix',
+        security: true,
+        source: 'review',
+        resolved: false,
+        decidedAt: at,
+      },
+      {
+        id: 2,
+        anchor: 'PRRT_8',
+        threadId: 'PRRT_8',
+        findingRef: 'old-2',
+        title: 'Off by one',
+        verdict: 'fix',
+        source: 'review',
+        resolved: false,
+        decidedAt: at,
+      },
+    ];
+    const { outcome } = await refresh(required);
+    expect(outcome.outcome).toBe('changes_required');
+    expect(outcome.security.result).toBe('failed');
+    expect(outcome.security.reasons.map((r) => [r.code, r.findingRef])).toEqual([['fix_owed', 'old-1']]);
+    // The outcome lists both; the security result only the security claim.
+    expect(outcome.reasons.filter((r) => r.code === 'fix_owed').map((r) => r.findingRef)).toEqual([
+      'old-1',
+      'old-2',
+    ]);
+  });
+
+  it('turns stale with the outcome when the pull request moves', async () => {
+    withPass();
+    await refresh(required);
+    const moved = await read(required, { current: { headSha: next } });
+    expect(moved).toMatchObject({ outcome: 'pending', stale: true });
+    expect(moved.security).toMatchObject({ result: 'pending', stale: true, headSha: head });
+    expect(moved.security.reasons.map((r) => r.code)).toEqual(['head_moved']);
+  });
+
+  describe('when the policy changes on an open pull request', () => {
+    const note = (project, revision = { headSha: head, baseRef: 'main' }) =>
+      enforcement
+        .noteReviewedRevision(project, 7, revision, { cfg, retryDelayMs: 0 })
+        .then(async (result) =>
+          result ? { outcome: result.outcome, published: await result.published } : null,
+        );
+
+    it('never reads a pass that did not run as passed, and takes the pass away on GitHub', async () => {
+      // Reviewed and passed while the project asked for no pass.
+      reviewed();
+      await refresh(on);
+      expect(carried.get(head)[0].state).toBe('success');
+      expect(store.row.securityPolicy).toBe('off');
+      // Seen again under the same policy: nothing to do.
+      expect(await note(on)).toBeNull();
+      expect(refreshCodeReviewOutcome).toHaveBeenCalledTimes(1);
+      // The project now requires the pass. A read says so at once, without writing:
+      const now = await read(enforcing);
+      expect(now.outcome).toBe('incomplete');
+      expect(now.security).toMatchObject({ policy: 'required', result: 'not_run', blocking: true });
+      // what GitHub carries is no longer this outcome's status.
+      expect(now.status).toMatchObject({ state: 'error', published: false, publishedState: 'success' });
+      // The next time the server sees the pull request, same head and base, the stored
+      // outcome is computed again and the `success` is replaced.
+      const seen = await note(enforcing);
+      expect(seen.outcome.outcome).toBe('incomplete');
+      expect(seen.published).toEqual({ published: true });
+      expect(carried.get(head)[0].state).toBe('error');
+      expect(store.row).toMatchObject({ outcome: 'incomplete', securityPolicy: 'required' });
+      // Once, not on every sighting.
+      expect(await note(enforcing)).toBeNull();
+      expect(refreshCodeReviewOutcome).toHaveBeenCalledTimes(2);
+    });
+
+    it('marks every stored outcome without a board lookup, including PRs a stale board omits', async () => {
+      const sweep = (project) =>
+        enforcement.retryReviewStatuses({ getProject: () => project, cfg, retryDelayMs: 0 });
+      reviewed();
+      await refresh(on);
+      expect(carried.get(head)[0].state).toBe('success');
+      expect(await sweep(on)).toEqual([]);
+      // No PR list can omit #7 or block a project save on GitHub.
+      expect(await enforcement.oweProjectOutcomes(enforcing)).toBe(1);
+      expect(markRepoCodeReviewOutcomesStale).toHaveBeenLastCalledWith(repo);
+      expect(store.row.recomputeAt).toBeTruthy();
+      expect(await sweep(enforcing)).toEqual([{ repo, prNumber: 7, published: true }]);
+      expect(carried.get(head)[0]).toMatchObject({ state: 'error' });
+      expect(store.row).toMatchObject({
+        outcome: 'incomplete',
+        securityPolicy: 'required',
+        recomputeAt: null,
+      });
+      expect(await sweep(enforcing)).toEqual([]);
+      expect(await enforcement.oweProjectOutcomes(on)).toBe(1);
+      expect(await sweep(on)).toEqual([{ repo, prNumber: 7, published: true }]);
+      expect(carried.get(head)[0]).toMatchObject({ state: 'success' });
+    });
+
+    it.each([
+      ['reviewRoundLimit', 1],
+      ['enforceReviewOutcome', true],
+    ])('refreshes a marked outcome on the same revision after %s changes', async (key, value) => {
+      reviewed();
+      store.count = { rounds: 1 };
+      if (key === 'reviewRoundLimit') store.stages.find((s) => s.stage === 'verify').status = 'failed';
+      await refresh(off);
+      const changed = { ...off, [key]: value };
+      await enforcement.oweProjectOutcomes(changed);
+      expect(store.row.recomputeAt).toBeTruthy();
+      const seen = await note(changed);
+      expect(seen).not.toBeNull();
+      expect(store.row.recomputeAt).toBeNull();
+      if (key === 'enforceReviewOutcome') {
+        expect(seen.outcome.enforced).toBe(true);
+        expect(seen.published).toEqual({ published: true });
+      } else {
+        expect(seen.outcome.reasons).toContainEqual(
+          expect.objectContaining({ code: 'round_limit_reached', limit: 1 }),
+        );
+      }
+      expect(await note(changed)).toBeNull();
+    });
+
+    it('stops an incomplete pass from blocking when the project no longer requires it', async () => {
+      withPass({ status: 'running', detail: null });
+      await refresh(enforcing);
+      expect(carried.get(head)[0].state).toBe('error');
+      const relaxed = { ...on, securityReview: 'advisory' };
+      const seen = await note(relaxed);
+      expect(seen.outcome.outcome).toBe('passed');
+      // What the pass amounts to is still said.
+      expect(seen.outcome.security).toMatchObject({
+        policy: 'advisory',
+        result: 'incomplete',
+        blocking: false,
+      });
+      expect(carried.get(head)[0].state).toBe('success');
+      // Switched off altogether: the same evidence, and nothing owed.
+      const switchedOff = await note(on);
+      expect(switchedOff.outcome.security).toMatchObject({
+        policy: 'off',
+        result: 'incomplete',
+        blocking: false,
+      });
+      expect(switchedOff.outcome.outcome).toBe('passed');
+    });
+
+    it('keeps a verified security fix blocking through every change of policy', async () => {
+      withPass({ detail: { coverage: categories(1) } });
+      store.findings = [finding({ security: true, securityEntry: 1, shouldFix: 'fix' })];
+      await refresh(enforcing);
+      for (const project of [{ ...on, securityReview: 'advisory' }, on, enforcing]) {
+        const seen = await note(project);
+        expect(seen.outcome.outcome).toBe('changes_required');
+        expect(seen.outcome.security.result).toBe('failed');
+        expect(carried.get(head)[0].state).toBe('failure');
+      }
+    });
+  });
+
+  it('reads one stored review’s own result, apart from the pull request’s', () => {
+    const coverage = categories(1);
+    const stored = {
+      id: 5,
+      jobId: 'job-5',
+      status: 'completed',
+      headSha: head,
+      baseRef: 'main',
+      stages: [...stagesAt(head).slice(0, 1), pass({ detail: { coverage } }), ...stagesAt(head).slice(1)],
+      findings: [finding({ security: true, securityEntry: 1, shouldFix: 'fix' })],
+    };
+    const own = enforcement.reviewSecurity(required, stored, []);
+    expect(own).toMatchObject({
+      policy: 'required',
+      result: 'failed',
+      blocking: true,
+      stale: false,
+      coverage,
+    });
+    // Another round's claims are not this review's.
+    const others = [
+      {
+        id: 1,
+        anchor: 'T',
+        threadId: 'T',
+        findingRef: 'x',
+        verdict: 'fix',
+        security: true,
+        decidedAt: '2026-11-10T10:00:00.000Z',
+      },
+    ];
+    const clean = enforcement.reviewSecurity(
+      required,
+      {
+        ...stored,
+        findings: [],
+        stages: [...stagesAt(head).slice(0, 1), pass(), ...stagesAt(head).slice(1)],
+      },
+      others,
+    );
+    expect(clean).toMatchObject({ result: 'passed', reasons: [] });
+    // A review from before the pass existed, under each policy.
+    const old = { ...stored, stages: stagesAt(head), findings: [] };
+    expect(enforcement.reviewSecurity(off, old, []).result).toBe('not_required');
+    expect(enforcement.reviewSecurity(advisory, old, []).result).toBe('not_run');
+    expect(enforcement.reviewSecurity(required, { ...old, stages: [] }, []).result).toBe('not_run');
   });
 });
 

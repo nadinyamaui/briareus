@@ -160,3 +160,77 @@ it('surfaces a refusal as a tool error', async () => {
   expect(result.result.isError).toBe(true);
   expect(result.result.content[0].text).toContain('Only a code review session');
 });
+
+// A server of its own: what it offers is decided by the environment its review's turn
+// starts it with (lib/jobs.js).
+async function withServer(env, run) {
+  const own = spawn(process.execPath, ['lib/code-review-mcp.js'], {
+    env: {
+      ...process.env,
+      REVIEWER_MEMORY_URL: `http://127.0.0.1:${server.address().port}`,
+      REVIEWER_MEMORY_TOKEN: 'test-token',
+      ...env,
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  const lines = createInterface({ input: own.stdout });
+  const pending = new Map();
+  let nextId = 0;
+  lines.on('line', (line) => {
+    const response = JSON.parse(line);
+    pending.get(response.id)?.(response);
+  });
+  const ask = (method, params) =>
+    new Promise((resolve) => {
+      const id = ++nextId;
+      pending.set(id, resolve);
+      own.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+    });
+  try {
+    return await run(ask);
+  } finally {
+    own.kill();
+    await new Promise((resolve) => own.once('close', resolve));
+  }
+}
+
+it('offers the security mark only to a review that runs a security pass', async () => {
+  // A review without the pass is offered exactly the tools it always was.
+  const [plainAdd, plainUpdate] = (await rpc('tools/list')).result.tools;
+  expect(plainAdd.inputSchema.properties).not.toHaveProperty('security');
+  expect(plainUpdate.inputSchema.properties).not.toHaveProperty('security');
+  expect(plainAdd.inputSchema.properties).not.toHaveProperty('securityEntry');
+  expect(JSON.stringify((await rpc('tools/list')).result.tools)).not.toMatch(/security pass/i);
+  await withServer({ REVIEWER_SECURITY_PASS: '1' }, async (ask) => {
+    const [add, update] = (await ask('tools/list')).result.tools;
+    expect(add.inputSchema.properties.security).toMatchObject({ type: 'boolean' });
+    expect(add.inputSchema.properties.security.description).toContain(
+      'Refused when this review has no completed security pass',
+    );
+    // Stated when the finding is registered, like how it relates to earlier threads.
+    expect(update.inputSchema.properties).not.toHaveProperty('security');
+    expect(add.inputSchema.required).toEqual(['severity', 'title']);
+    // Which finding of the pass's record a registration publishes, by its id.
+    expect(add.inputSchema.properties.securityEntry).toMatchObject({ type: 'integer', minimum: 1 });
+    expect(add.inputSchema.properties.securityEntry.description).toContain('One registration per id');
+    expect(update.inputSchema.properties).not.toHaveProperty('securityEntry');
+    const { security: _security, securityEntry: _entry, ...rest } = add.inputSchema.properties;
+    expect(rest).toEqual(plainAdd.inputSchema.properties);
+    const marked = { severity: 'high', title: 'Null deref', security: true };
+    const added = await ask('tools/call', { name: 'review_finding_add', arguments: marked });
+    expect(added.result.content[0].text).toBe(
+      'Registered finding #7 [high, fix, confirmed, security] lib/a.js:4 Null deref',
+    );
+    expect(calls.at(-1)).toMatchObject({ method: 'POST', body: marked });
+    const published = { severity: 'high', title: 'Null deref', securityEntry: 2, security: true };
+    const named = await ask('tools/call', { name: 'review_finding_add', arguments: published });
+    expect(named.result.content[0].text).toBe(
+      'Registered finding #7 [high, fix, confirmed, security (record #2)] lib/a.js:4 Null deref',
+    );
+    expect(calls.at(-1)).toMatchObject({ method: 'POST', body: published });
+  });
+  for (const value of ['0', 'true', ''])
+    await withServer({ REVIEWER_SECURITY_PASS: value }, async (ask) => {
+      expect((await ask('tools/list')).result.tools[0].inputSchema.properties).not.toHaveProperty('security');
+    });
+});
