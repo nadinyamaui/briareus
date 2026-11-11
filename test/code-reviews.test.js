@@ -628,9 +628,12 @@ describe('pullCodeReviewRoutes', () => {
       expect(json.reviewRounds).toEqual(view);
       expect(json.codeReviews).toEqual((await read({ repo: 'acme/shop', pr: '12' })).json.codeReviews);
       expect(json.codeReviews.map((r) => r.id)).toEqual([7, 5]);
-      // The reviews read stays on stored records: it never asks for a GitHub read.
+      // The reviews read stays on stored records: it never asks for a GitHub read. The
+      // newest review's findings, already read, are handed in rather than read again.
       expect(rounds).toHaveBeenCalledTimes(1);
-      expect(rounds).toHaveBeenCalledWith({ repo: 'acme/shop' }, 12);
+      const newest = (await store.listPullCodeReviews('acme/shop', 12, 1))[0];
+      expect(rounds).toHaveBeenCalledWith({ repo: 'acme/shop' }, 12, { findings: newest.findings });
+      expect(newest.findings).not.toHaveLength(0);
     });
 
     it('shows which round each review ran as and what it covered', async () => {

@@ -921,3 +921,27 @@ describe('speech generation config', () => {
     expect(getConfig().speech).toEqual({ apiKey: 'sk-speech', model: 'gpt-4o-mini-tts' });
   });
 });
+
+describe('the database boot wait', () => {
+  it('reads the database boot wait, treating an empty key as unset', async () => {
+    for (const [value, ms] of [
+      [undefined, 120000],
+      ['', 120000],
+      ['0', 0],
+      ['300', 300000],
+    ]) {
+      const pairs = value === undefined ? complete() : complete({ DB_BOOT_WAIT_SECONDS: value });
+      const { getConfig } = await loadConfig(pairs);
+      expect(getConfig().dbBootWaitMs).toBe(ms);
+      expect(getConfig().db).not.toHaveProperty('bootWaitMs');
+    }
+  });
+
+  it('refuses a database boot wait that is not 0 or more seconds', async () => {
+    // A NaN bound never runs out, so boot would redial the database every millisecond.
+    for (const value of ['2m', 'Infinity', '-1']) {
+      const { getConfig } = await loadConfig(complete({ DB_BOOT_WAIT_SECONDS: value }));
+      expect(() => getConfig()).toThrow(`DB_BOOT_WAIT_SECONDS (0 or more seconds: ${value})`);
+    }
+  });
+});

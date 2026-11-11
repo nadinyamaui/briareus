@@ -7,7 +7,7 @@ import { createSlackService } from '../lib/slack.js';
 // Run the actual store-loading block without starting HTTP, timers or workers.
 const source = readFileSync(new URL('../server.js', import.meta.url), 'utf8');
 const startup = source.slice(
-  source.lastIndexOf('(async () => {', source.indexOf('    await initDb();')) + '(async () => {'.length,
+  source.lastIndexOf('(async () => {', source.indexOf('    await waitForDb();')) + '(async () => {'.length,
   source.indexOf('// Only after the provider rows are loaded.'),
 );
 
@@ -25,7 +25,7 @@ describe('startup store loading', () => {
       const shares = createShares({ load: loads.shares });
       const deps = { users, shares, console: { error: vi.fn() } };
       for (const name of [
-        'initDb',
+        'waitForDb',
         'initTemplates',
         'initProjects',
         'initSavedPrompts',
