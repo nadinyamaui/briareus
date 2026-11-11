@@ -365,6 +365,12 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review decisions on
     expect(await before('T_dismissed')).toBe(true);
     await saveCodeReviewDecisions(repo, pr, [rule('T_dismissed', 'fix', 3000, { source: 'api' })]);
     expect(await before('T_dismissed')).toBe(true);
+    // Overruled through a verdict in between: the dismissal still closed the thread.
+    await saveCodeReviewDecisions(repo, pr, [rule('T_between', 'dismiss', 1000)]);
+    await saveCodeReviewDecisions(repo, pr, [rule('T_between', 'optional', 2000, { source: 'api' })]);
+    expect(await before('T_between')).toBe(true);
+    await saveCodeReviewDecisions(repo, pr, [rule('T_between', 'fix', 3000, { source: 'api' })]);
+    expect(await before('T_between')).toBe(true);
     // Required on a thread somebody had already resolved.
     await saveCodeReviewDecisions(repo, pr, [
       { anchor: 'T_closed', findingRef: 'ref-T_closed', resolved: true },

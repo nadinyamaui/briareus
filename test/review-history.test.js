@@ -523,6 +523,23 @@ describe('buildReviewHistory', () => {
         ),
       ]),
     ).toMatchObject({ disposition: 'fix', suppressible: false });
+    // Still owed when the fix is restated, or follows a verdict given in between.
+    for (const middle of ['**Fix** Still reproduces.', '**Optional** Minor after all.']) {
+      const later = history([
+        thread(
+          'T',
+          [
+            finding,
+            said(2, 'octo-reviewer', '**Dismissed** Looked unreachable.', 1),
+            said(3, 'octo-reviewer', middle, 2),
+            said(4, 'octo-reviewer', '**Fix** Reachable through the importer.', 3),
+          ],
+          { resolved: true },
+        ),
+      ]);
+      expect(later.threads[0]).toMatchObject({ disposition: 'fix', suppressible: false });
+      expect(later.sync[0]).toMatchObject({ verdict: 'fix', resolvedBefore: true });
+    }
     // Required first and resolved since: addressed.
     const addressed = history([
       thread('T', [finding, said(2, 'octo-reviewer', '**Fix** Reproduced.', 1)], { resolved: true }),
@@ -1088,6 +1105,15 @@ describe('a review session’s history', () => {
     expect(reviewHistoryOf('job-2')).toBeNull();
     forgetReviewHistory('job-1');
     expect(reviewHistoryOf('job-1')).toBeNull();
+  });
+
+  it('narrows a file that was already there to its owner before writing to it', async () => {
+    githubGraphql.mockResolvedValue(threadsPage([dismissedThread()]));
+    fs.writeFileSync(file, 'left by an earlier run');
+    fs.chmodSync(file, 0o644);
+    await loadReviewHistory(scope({ head }));
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(fs.readFileSync(file, 'utf8')).threads).toHaveLength(1);
   });
 
   it('will not follow a link planted where the file goes', async () => {
