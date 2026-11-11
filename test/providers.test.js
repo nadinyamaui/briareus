@@ -605,6 +605,28 @@ describe('buildArgs', () => {
     expect(built).toMatchObject({ promptVia: 'argument', briefingInPrompt: false });
   });
 
+  it('appends a later round’s scope to the review command and leaves the command as it is', () => {
+    const run = (extra) =>
+      BINARIES.claude.buildArgs({
+        model: 'claude-opus-5-5',
+        effort: 'high',
+        sessionId: 'review-session',
+        commandPrompt: '/code-review high 12',
+        ...extra,
+      }).args;
+    const scoped = run({ reviewScopeFile: '/tmp/prompts/job-review-scope-prompt.txt' });
+    expect(scoped.slice(0, 2)).toEqual(['-p', '/code-review high 12']);
+    expect(scoped.slice(scoped.indexOf('text') + 1)).toEqual([
+      '--append-system-prompt-file',
+      '/tmp/prompts/job-review-scope-prompt.txt',
+      '--session-id',
+      'review-session',
+    ]);
+    // A first round runs exactly as it always did.
+    expect(run({})).not.toContain('--append-system-prompt-file');
+    expect(scoped.filter((arg) => !arg.includes('system-prompt') && !arg.includes('scope'))).toEqual(run({}));
+  });
+
   it('runs the review command in text mode with unrestricted tools', () => {
     const built = BINARIES.claude.buildArgs({
       model: 'claude-opus-5-5',

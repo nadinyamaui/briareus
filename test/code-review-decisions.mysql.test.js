@@ -65,7 +65,9 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review decisions on
     expect(await dbHealthy()).toBe(true);
     pool = mysql.createPool({ ...config, database, connectionLimit: 2 });
     review = await createCodeReview({ jobId: 'job-1', repo, prNumber: 7, branch: 'feature' });
-  });
+    // Every migration runs first, which takes longer when another suite builds its own
+    // database beside this one.
+  }, 120_000);
   afterAll(async () => {
     await pool?.end();
     await bootstrap?.query(`DROP DATABASE IF EXISTS \`${scratch.database}\``);
@@ -73,8 +75,11 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review decisions on
   });
 
   it('adds the decisions table and the finding columns at boot, and applies twice', async () => {
-    const [ran] = await pool.query('SELECT `migration` FROM `migrations` ORDER BY `id` DESC LIMIT 1');
-    expect(ran[0].migration).toBe('2026_11_10_120000_add_code_review_decisions');
+    // By name, not as the latest: later migrations follow it.
+    const [ran] = await pool.query('SELECT `migration` FROM `migrations` WHERE `migration` = ?', [
+      '2026_11_10_120000_add_code_review_decisions',
+    ]);
+    expect(ran).toHaveLength(1);
     const before = await columns('code_review_findings');
     expect(before.slice(before.indexOf('comments') + 1, before.indexOf('created_at'))).toEqual(ADDED);
     await up({ context: pool });

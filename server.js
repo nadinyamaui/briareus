@@ -36,6 +36,12 @@ import { createPrintService } from './lib/print.js';
 import { printAgentRoutes } from './lib/print-agent.js';
 import { projectEnvRoutes } from './lib/project-env.js';
 import { codeReviewRoutes, pullCodeReviewRoutes } from './lib/code-reviews.js';
+import {
+  continueReviewProblem,
+  readReviewRounds,
+  reviewLimitsWaiting,
+  reviewRefusalBody,
+} from './lib/review-rounds.js';
 import { createSshResourceMonitor } from './lib/ssh-resource-monitor.js';
 import { sshTelemetryRoutes } from './lib/ssh-telemetry-routes.js';
 import { createSlackService } from './lib/slack.js';
@@ -107,6 +113,7 @@ import {
   devSessionRecords,
   sessionTreeIds,
   createDevSession,
+  admitUserReview,
   sendDevMessage,
   askDevSessionBtw,
   cancelDevTurn,
@@ -763,6 +770,8 @@ api.use(
       updateCodeReviewFinding,
       listCodeReviewDecisions,
     },
+    rounds: (project, prNumber, options) =>
+      readReviewRounds(project, prNumber, { ...options, cfg: getConfig() }),
   }),
 );
 api.use(
@@ -879,6 +888,15 @@ api.use(
     getJob,
     sendMessage: sendDevMessage,
     sshVisible: sshRuledBy,
+    // A PR is open while the board lists it; the board is cached and mirrored, so this
+    // costs no GitHub call on an ordinary poll.
+    reviewLimits: (repos) =>
+      reviewLimitsWaiting({
+        getProject,
+        repos,
+        isOpen: async (project, prNumber) =>
+          (await projectPulls(project)).pulls.some((pr) => pr.number === prNumber),
+      }),
   }),
 );
 
@@ -1067,7 +1085,7 @@ api.post('/api/agent/sessions/:id/message', (req, res) => {
   try {
     // Reopening a closed worker is effectively a spawn, so the open-worker cap applies.
     if (!DEV_OPEN.includes(worker.status)) assertWorkerSlot(orchestrator);
-    sendDevMessage(worker.id, String((req.body || {}).text || ''));
+    sendDevMessage(worker.id, String((req.body || {}).text || ''), undefined, { fromAgent: true });
     res.json({ session: workerSummary(worker) });
   } catch (e) {
     res.status(400).json({ error: e.message });
@@ -1842,9 +1860,12 @@ api.get('/api/dev/actions', (req, res) => {
 // errands run in the local checkout (no clone or pooled database wasted); actions that run the
 // app get a fully set up workspace clone (lib/actions.js).
 api.post('/api/dev/actions', async (req, res) => {
-  const { action: actionId, repo, prNumber, provider, model, effort, input } = req.body || {};
+  const { action: actionId, repo, prNumber, provider, model, effort, input, continueReview } = req.body || {};
   const action = getAction(actionId);
   if (!action) return res.status(400).json({ error: `Unknown action: ${actionId}` });
+  // One more review round past the project's limit, on a person's word: never implied.
+  const misused = continueReviewProblem(action.id, continueReview);
+  if (misused) return res.status(400).json({ error: misused });
   // An action with required input (✍ Give feedback) has no errand without it.
   const answer = String(input == null ? '' : input).trim();
   if (action.input && action.input.required && !answer) {
@@ -1886,13 +1907,30 @@ api.post('/api/dev/actions', async (req, res) => {
       // What the user typed, verbatim; only an action with `input` reads it.
       input: answer,
     };
+    // A person's own request. At the pull request's review round limit it is refused
+    // like any other unless it says continueReview, which is recorded with their user.
+    const owner = requestOwner(res);
+    const reviewRequest =
+      action.id === 'review'
+        ? await admitUserReview({ project, prNumber: number, pr, ownerId: owner, continueReview })
+        : null;
     // A prompt that refuses fails the request rather than starting an empty errand.
     const spec = await actionSessionSpec(action, context);
-    const session = createDevSession({ provider, model, effort, ...spec, ownerId: requestOwner(res) });
+    const session = createDevSession({
+      provider,
+      model,
+      effort,
+      ...spec,
+      ownerId: owner,
+      ...(reviewRequest ? { reviewRequest } : {}),
+    });
     res.status(201).json({
       session,
     });
   } catch (e) {
+    // The review bound answers 409 with what was used and what is unresolved.
+    const refused = reviewRefusalBody(e);
+    if (refused) return res.status(409).json(refused);
     res.status(400).json({ error: e.message });
   }
 });

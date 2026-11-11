@@ -78,7 +78,8 @@ earlier sheets as history. Verdicts read only that run's sheet once it is marked
 and base branch still match the live PR. Missing or stale execution is incomplete,
 while actual current-run failures still stop the loop for human judgment.
 With `babysitPrs` enabled, conflict resolution, CI fixes and recommended code reviews run every 15 minutes,
-using the project's action runtime and respecting author filters and retry limits.
+using the project's action runtime and respecting author filters and retry limits. Reviews of one pull
+request are bounded by the project's `reviewRoundLimit` (see [Review rounds](#review-rounds)).
 
 Each code review session is recorded in the `code_reviews` table: its PR,
 branch, the reviewed head, its provider, model and effort, its tokens and cost
@@ -239,6 +240,167 @@ written after the upgrade without a stored decision behind it. The existing
 responses and requests are unchanged apart from the added fields; the fields
 describing a finding's reconciliation are read-only for clients.
 
+### Review rounds
+
+Reviewing a pull request again after every push is bounded. Each review of a
+new revision is a **round**, counted per pull request across all its commits,
+and a project allows `reviewRoundLimit` of them (3 by default). The flow of a
+review stays discover, publish, verify, label, the discovery is still the
+provider's own review command, and the project's provider, model and effort are
+used as configured; rounds only decide whether a review starts and what it
+covers.
+
+**What a round is.** One review of one revision: the pull request's head commit
+and the branch it targets. The session claims its round when discovery has
+checked that its checkout is the pull request's current head, so a round is
+never held for a session that did not start. The same revision is always the
+same round, however often its review runs:
+
+- a review recovered after a server restart continues its round;
+- a review that failed and is run again on the same head uses the round it had
+  (`attempts` on the round counts those runs);
+- a round that failed before its publish step started reviewed nothing anybody
+  received, so the next revision takes that round over instead of using a new
+  one. A review that goes stale because the pull request's head or base moved
+  during discovery is such a round, and so is one whose publish step never
+  began because the pull request's thread history could not be read or the
+  review was stopped first. Once a publish step has started, the round stays
+  what it is;
+- a push never resets the count, and neither does deleting the review's session
+  or its stored review: the count is kept per pull request, in tables that
+  reference neither.
+
+Claims for one pull request run one at a time under a row lock, so two starters
+can never both take the last round. A second session asking for a revision that
+another session is reviewing right now is refused. A review and its round are
+settled in one transaction, by the round the review row names, so a finished or
+failed review never marks any other round. A round still marked running that no
+session is running any more (its settling write was lost) is recorded as failed
+when the next round on the pull request is claimed.
+
+**Who asked.** The PR babysitter and an orchestrator's `start_pr_action` are
+automation; a review started through `POST /api/v1/actions` or a person's typed
+`/review` is that person's request, even in an automation-created session.
+Every round counts, whoever asked. The difference is in what each may
+do at the limit and with a head that was already reviewed:
+
+| Request                         | Babysitter, orchestrator     | Person (`POST /actions`)        |
+| ------------------------------- | ---------------------------- | ------------------------------- |
+| New revision, rounds left       | Starts                       | Starts                          |
+| New revision, limit used        | Refused                      | Refused unless `continueReview` |
+| Revision already reviewed       | Refused, it is not run twice | Runs again, on the round it had |
+| Revision under review elsewhere | Refused                      | Refused                         |
+
+**At the limit** no further review starts by itself. Nothing is labelled,
+approved or reported as passed because the rounds ran out: the review simply
+does not run, and what the earlier rounds left unresolved (required fixes not
+yet addressed, findings without a verified verdict) is listed for a person to
+judge. The refusal says so and how to go on:
+
+- The babysitter is refused before any session starts. It remembers the answer
+  for that head and that limit, so it asks once per push, not every 15 minutes,
+  and asks again when the project's limit changes. Conflict and CI errands on
+  the same pull request carry on.
+- An orchestrator's `start_pr_action` answers 409 with the reason and what to
+  tell its user. An agent has no way to continue past the limit.
+- A plain `POST /api/v1/actions` review answers 409 with
+  `{ error, code: "review_round_limit", reviewRounds }`.
+- The pull request appears in `GET /api/v1/attention` as a `review-limit` item
+  for whoever may see the project, until a round is continued, the limit is
+  raised or the pull request closes.
+- The last round the limit allows says so in the first line of its summary
+  comment on the pull request. No label is added and no other comment is
+  posted.
+
+**Continuing on purpose.** A person sends the review again with
+`"continueReview": true`. That grants exactly one more round, for that request
+and for the head the pull request had when it was made: it is recorded on the
+round with the user and the time (`continuation`), the count goes up rather than
+back, and the next new revision is at the limit again. A continuation whose
+review fails before it claims its round, or finds another head checked out, is
+spent and has to be asked for again. The flag changes nothing while rounds are left and is refused on any
+other action. Raising `reviewRoundLimit` in the project's settings is the other
+deliberate way: rounds are allowed again up to the new limit.
+
+**What a round covers.** The first round reviews the whole pull request, exactly
+as before. A later round is `incremental`: the changes since the head the last
+completed round reviewed, the findings still outstanding, and the behaviour
+those changes affect. The server works the scope out from the review's own
+checkout and widens it to the whole pull request when the change is not a
+follow-up to what was reviewed:
+
+| `scopeReason`          | Scope       | When                                                                                   |
+| ---------------------- | ----------- | -------------------------------------------------------------------------------------- |
+| `first_review`         | full        | The pull request's first round.                                                        |
+| `no_completed_review`  | full        | No earlier round ran to its end.                                                       |
+| `base_changed`         | full        | The pull request now targets another branch.                                           |
+| `history_rewritten`    | full        | The reviewed head is not an ancestor of this one (a rebase, a force-push), or is gone. |
+| `base_updated`         | full        | The merge base moved: the branch merged or rebased onto its base since.                |
+| `base_unknown`         | full        | A merge base could not be established.                                                 |
+| `large_delta`          | full        | More than 30 files or 1000 changed lines since the reviewed head.                      |
+| `most_of_pr`           | full        | The delta is at least half of the whole pull request's diff.                           |
+| `delta_unknown`        | full        | The delta could not be measured, or a probe of the checkout did not finish in time.    |
+| `changes_since_review` | incremental | None of the above.                                                                     |
+
+Every doubt widens; a narrow review is chosen only on facts the server
+established. The facts come from git in the review's checkout, run without
+blocking the server and given 30 seconds each (measuring a diff in a blobless
+clone fetches from origin); one that does not finish is `delta_unknown`.
+
+The provider's review command is not rewritten for a later round.
+Its scope reaches it as instructions beside the command (an appended system
+prompt for Claude, developer instructions for Codex) and a data file with the
+round, the commit range and the outstanding findings, whose text was written on
+GitHub and is never prompt text. The agent may still widen the review when it
+finds the change reaches further than its diff. Publication reconciles with the
+pull request's earlier threads exactly as described above, whatever the scope.
+Each review records its `round`, `scope`, `scopeReason` and `scopeBaseSha`.
+
+**Reading it.** `GET /api/v1/pulls/{number}/code-review-rounds` answers the
+limit, the rounds used and left, `limitReached`, any refusal still waiting, each
+round (its revision, status, who asked, its scope and any continuation) and
+`unresolved`. `GET /api/v1/pulls/{number}/code-reviews` carries the same object
+as `reviewRounds`. `limitReached` says the reviewing stopped; it is never a
+verdict on the pull request.
+
+`unresolved` says how current it is, in `asOf`. Whether a thread is resolved is
+stored only when a review reads the pull request's threads, at its publish step,
+so the stored state is as of the last round that got that far: a fix made and
+resolved since, or a thread reopened on GitHub, is not in it. The dedicated read
+therefore reads the threads from GitHub when it is asked (cached for a minute,
+nothing is written) and answers `asOf.source` `github`; when GitHub cannot be
+read it answers the stored state with `asOf.source` `stored`, the round, head and
+time it dates from and the reason in `asOf.error`. The 409 of a refused review,
+the attention item and `reviewRounds` on the code-reviews read never call GitHub:
+they give the stored state and name the round it is as of.
+
+**Setting.** `reviewRoundLimit` on the project: a whole number from 1 to 20, or
+0 for no limit, in which case rounds are still counted and scoped but never
+refused. Null or an empty value on a write resets it to 3; it never means "no
+limit".
+
+**Migration.** `2026_11_10_130000_add_code_review_rounds` adds
+`code_review_round_counts` (one row per pull request: the count, the
+continuations and the refusal that waits), `code_review_rounds` (one row per
+round), the `round`, `scope`, `scope_reason` and `scope_base_sha` columns on
+`code_reviews`, and `review_round_limit` on `projects`, 3 for every existing
+project. Counting starts when it runs: reviews stored before it are not turned
+into rounds, so an open pull request's next review is its round one and reviews
+the whole pull request. A review session in flight during the upgrade claims its
+round at its next discovery; one already past discovery finishes without one.
+Existing responses and requests are unchanged apart from the added fields, the
+added `continueReview` parameter and the 409 a review at the limit now answers.
+
+What this does not do: a claim fails closed, so a review does not start while
+the database cannot be reached; the pull request board still recommends a
+review from labels alone, and the refusal is what tells an at-limit pull request
+apart; and the attention item is listed for pull requests the board mirror
+knows as open. That the provider's review command honours the scope it is
+handed (Claude's appended system prompt, Codex's developer instructions) has not
+been verified against a live review: where it is not honoured the round reviews
+the whole pull request while recorded as `incremental`, which errs on the side
+of reviewing more.
+
 See [PR actions and QA](../README.md#pull-request-actions-and-qa) and the
 [GitHub API reference](api-v1-reference.md#pull-requests-and-issues).
 
@@ -350,6 +512,9 @@ These additions are present in the server revision documented here:
   register findings through their own MCP tools.; clients read them per
   pull request through the API. What the reviews of a pull request decided is
   kept per pull request and outlives the reviews and their sessions.
+- Code reviews of one pull request are bounded by a per-project round limit
+  (`reviewRoundLimit`, 3 by default); later rounds review what changed, and a
+  person continues past the limit explicitly.
 
 - Slack's core inbox has live events and operator replies; eligible sessions
   can now read their project's channels, DMs and threads too.

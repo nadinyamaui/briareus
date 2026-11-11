@@ -241,6 +241,15 @@ deduplicated by head commit, with a cap on repeated pushes; reviews push nothing
 so they also run on PRs by other authors, at most three per project each round. It skips drafts, forks, blocked PRs, and
 occupied sessions.
 
+Reviewing one pull request again and again is bounded: each review of a new
+revision is a round, and a project allows `reviewRoundLimit` of them per pull
+request (3 by default, 0 for no limit), counted across all its commits. The
+first round reviews the whole PR; later ones review what changed since, the
+findings still outstanding and what those changes affect, or the whole PR again
+when the change calls for it. At the limit no further review starts until a
+person continues it on purpose, and nothing is marked as passed because rounds
+ran out (see [Review rounds](docs/features.md#review-rounds)).
+
 A session’s `qaLoop` starts QA when the task settles on an open pull request. QA
 writes and executes a test sheet and reports passed, failed, or incomplete coverage.
 A new head invalidates the previous result. Disarming QA leaves any running QA

@@ -190,3 +190,50 @@ it.each(['admin', 'member'])('keeps cross-project supervisor context for a %s', 
     await close();
   }
 });
+
+it('lists reviews stopped at their round limit to whoever may see the project, and survives an unreadable store', async () => {
+  const waiting = (repo, prNumber) => ({
+    repo,
+    prNumber,
+    used: 3,
+    limit: 3,
+    continuations: 0,
+    refusedAt: '2026-11-10T12:00:00.000Z',
+    refusedHeadSha: 'd'.repeat(40),
+    fix: 1,
+    unverified: 0,
+  });
+  const reviewLimits = vi.fn(async () => [waiting('acme/shop', 7), waiting('acme/site', 9)]);
+  const quiet = { listSessions: () => [], reviewLimits };
+  const ids = async (call) =>
+    (await (await call('/api/operations/attention')).json()).items.map((item) => item.id);
+  const admin = await serve(quiet);
+  const member = await serve(quiet, { id: 2, role: 'member' }, ['acme/shop']);
+  try {
+    // No session carries these, so no session's visibility hides them from an admin.
+    expect(await ids(admin.call)).toEqual(['review-limit:acme/shop#7', 'review-limit:acme/site#9']);
+    expect(reviewLimits).toHaveBeenLastCalledWith(null);
+    // A token held to one project sees that project's.
+    expect(await ids(member.call)).toEqual(['review-limit:acme/shop#7']);
+    expect(reviewLimits).toHaveBeenLastCalledWith(['acme/shop']);
+    const [item] = (await (await member.call('/api/operations/attention')).json()).items;
+    expect(item).toMatchObject({ kind: 'review-limit', repo: 'acme/shop', prNumber: 7, sessionId: null });
+  } finally {
+    await admin.close();
+    await member.close();
+  }
+  const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const down = await serve({
+    reviewLimits: async () => {
+      throw new Error('Database unavailable');
+    },
+  });
+  try {
+    // The rest of what waits is still listed.
+    expect(await ids(down.call)).toEqual(['s:recovery']);
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('Database unavailable'));
+  } finally {
+    await down.close();
+    logged.mockRestore();
+  }
+});

@@ -146,4 +146,47 @@ describe('operator attention', () => {
       href: '/sessions/a',
     });
   });
+  it('lists a pull request whose code review stopped at its round limit, with what is unresolved', () => {
+    const waiting = {
+      repo: 'acme/shop',
+      prNumber: 7,
+      used: 3,
+      limit: 3,
+      continuations: 0,
+      refusedAt: '2026-11-10T12:00:00.000Z',
+      refusedHeadSha: 'd'.repeat(40),
+      fix: 2,
+      unverified: 1,
+      asOf: { source: 'stored', round: 3, headSha: 'c'.repeat(40), at: '2026-11-10T11:00:00.000Z' },
+    };
+    const [item] = attentionItems([], [], [], [waiting]);
+    expect(item).toEqual({
+      id: 'review-limit:acme/shop#7',
+      kind: 'review-limit',
+      sessionId: null,
+      taskId: null,
+      revision: '3:0',
+      repo: 'acme/shop',
+      prNumber: 7,
+      title: 'PR #7',
+      summary:
+        'Code review stopped at its limit (3 of 3 rounds); 2 required fixes and 1 unverified finding unresolved as of round 3, which GitHub may have moved past. Not reviewed past round 3 and not marked as passed: decide whether to continue.',
+      href: 'https://github.com/acme/shop/pull/7',
+      at: '2026-11-10T12:00:00.000Z',
+    });
+    // The pushes that keep being refused are the same occurrence; a continued review
+    // that runs out again is a new one.
+    const later = { ...waiting, refusedHeadSha: 'e'.repeat(40) };
+    expect(attentionItems([], [], [], [later])[0].revision).toBe('3:0');
+    const again = { ...waiting, used: 4, continuations: 1, fix: 0, unverified: 0 };
+    expect(attentionItems([], [], [], [again])[0]).toMatchObject({
+      revision: '4:1',
+      summary: expect.stringContaining('(4 of 3 rounds); no unresolved finding recorded as of round 3,'),
+    });
+    // The counts are never passed off as current, whatever is known of their age.
+    const undated = { ...waiting, asOf: { source: 'stored', round: null } };
+    expect(attentionItems([], [], [], [undated])[0].summary).toContain(
+      'unresolved in the stored records, which GitHub may have moved past',
+    );
+  });
 });
