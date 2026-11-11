@@ -636,6 +636,26 @@ describe('pullCodeReviewRoutes', () => {
       expect(newest.findings).not.toHaveLength(0);
     });
 
+    it('hands in the newest finished review’s findings, not a running session’s empty row', async () => {
+      stored.unshift({
+        id: 9,
+        jobId: 'rev3',
+        repo: 'acme/shop',
+        prNumber: 12,
+        status: 'running',
+        handlingStatus: 'pending',
+        findings: [],
+      });
+      const res = await fetch(`${roundsBase}/api/pr/code-reviews?repo=acme/shop&pr=12`);
+      expect(res.status).toBe(200);
+      expect(rounds).toHaveBeenCalledWith({ repo: 'acme/shop' }, 12, { findings: stored[1].findings });
+      // None finished in the window: the rounds read looks it up itself.
+      stored.splice(1, 1);
+      rounds.mockClear();
+      await fetch(`${roundsBase}/api/pr/code-reviews?repo=acme/shop&pr=12`);
+      expect(rounds).toHaveBeenCalledWith({ repo: 'acme/shop' }, 12, { findings: null });
+    });
+
     it('shows which round each review ran as and what it covered', async () => {
       Object.assign(stored[0], {
         round: 2,

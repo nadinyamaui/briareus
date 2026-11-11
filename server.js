@@ -924,9 +924,10 @@ api.use(
     sshVisible: sshRuledBy,
     // A PR is open while the board lists it; the board is cached and mirrored, so this
     // costs no GitHub call on an ordinary poll.
-    reviewLimits: () =>
+    reviewLimits: (repos) =>
       reviewLimitsWaiting({
         getProject,
+        repos,
         isOpen: async (project, prNumber) =>
           (await projectPulls(project)).pulls.some((pr) => pr.number === prNumber),
       }),
@@ -1124,7 +1125,7 @@ api.post('/api/agent/sessions/:id/message', (req, res) => {
   try {
     // Reopening a closed worker is effectively a spawn, so the open-worker cap applies.
     if (!DEV_OPEN.includes(worker.status)) assertWorkerSlot(orchestrator);
-    sendDevMessage(worker.id, String((req.body || {}).text || ''));
+    sendDevMessage(worker.id, String((req.body || {}).text || ''), undefined, { fromAgent: true });
     res.json({ session: workerSummary(worker) });
   } catch (e) {
     res.status(400).json({ error: e.message });

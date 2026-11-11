@@ -1874,11 +1874,11 @@ describe('Claude code review in a later round', () => {
         2,
         expect.objectContaining({ round: 2, scope: 'incremental', scopeBaseSha: reviewedHead }),
       );
-      // Counted as the babysitter's, the way the session was started.
+      // The person typed this request into a session the babysitter started.
       expect(state.reviewRounds.get('acme/shop#4300').rounds[1]).toMatchObject({
         round: 2,
         headSha: head,
-        source: 'babysitter',
+        source: 'user',
         jobId: id,
       });
       invocations[0].child.emit('close', 1);
@@ -2333,6 +2333,113 @@ describe('native Codex code review', () => {
       await vi.waitFor(() => expect(job.status).toBe('idle'));
     });
 
+    it('keeps its own previous findings when claiming the next round changes its review row', async () => {
+      trackBase();
+      const reviewedHead = commit('cart.js', 200, 'feature');
+      pullAt(commit('fix.js', 12, 'fix'));
+      const pull = reviewedRounds('acme/shop', 77, [reviewedHead], { baseRef, mergeBaseSha: head });
+      pull.rounds[0].jobId = id;
+      const review = { id: 40, jobId: id, round: 1, headSha: reviewedHead };
+      getCodeReviewByJob.mockImplementation(async (jobId) => (jobId === id ? { ...review } : null));
+      const finding = { findingRef: 'ref-silent', shouldFix: null, title: 'Unchecked input' };
+      let findings = [finding];
+      listCodeReviewFindings.mockImplementation(async () => [...findings]);
+      claimCodeReviewRound.mockImplementationOnce(async (request, decide) => {
+        const claim = state.claimRound(request, decide);
+        review.round = claim.round.round; // The real claim writes this before returning.
+        return claim;
+      });
+      restartCodeReview.mockImplementationOnce(async () => {
+        findings = []; // The real reset deletes the previous run's findings.
+      });
+      sendDevMessage(id, '/review');
+      await vi.waitFor(() => expect(invocations).toHaveLength(1));
+      expect(review.round).toBe(2);
+      expect(findings).toEqual([]);
+      expect(job.codeReviewRound).toMatchObject({ round: 2, outstanding: 1 });
+      expect(JSON.parse(fs.readFileSync(scopePath(), 'utf8')).outstanding).toEqual([
+        expect.objectContaining({ findingRef: 'ref-silent', status: 'unverified' }),
+      ]);
+      finishReview(invocations[0], 1);
+      await vi.waitFor(() => expect(job.status).toBe('idle'));
+    });
+
+    it.each([false, true])(
+      'treats a person’s /review as theirs without changing later automation (queued: %s)',
+      async (queued) => {
+        trackBase();
+        const pull = reviewedRounds('acme/shop', 77, [head], { baseRef });
+        job.ownerId = 4;
+        job.reviewRequest = { source: 'babysitter', requestedBy: null, continuation: false };
+        if (queued) {
+          // Restore a command queued before a restart, then let the next send drain it.
+          job.recoveryQueue = [
+            { prompt: '/review', shown: '/review', files: [], unattended: false, automatic: false },
+          ];
+          job.status = 'closed';
+          state.stored = [job];
+          await initJobs();
+          job = getJob(id);
+          job.status = 'idle';
+          sendDevMessage(id, 'Continue');
+        } else sendDevMessage(id, '/review');
+        await vi.waitFor(() => expect(invocations).toHaveLength(1));
+        expect(claimCodeReviewRound.mock.calls[0][0]).toMatchObject({
+          source: 'user',
+          requestedBy: 'user:4',
+          continuation: false,
+        });
+        expect(job.recoveryTurn.opts.reviewFromUser).toBe(true);
+        expect(pull.count.rounds).toBe(1);
+        fs.writeFileSync(summaryPath, 'A candidate finding');
+        finishReview(invocations[0]);
+        await finishRest(1);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+        sendDevMessage(id, '/review', undefined, { unattended: true });
+        await vi.waitFor(() => expect(job.error).toMatch(/automated review does not run twice/));
+        expect(claimCodeReviewRound.mock.calls.at(-1)[0]).toMatchObject({ source: 'babysitter' });
+        expect(pull.count.rounds).toBe(1);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+      },
+    );
+
+    it.each([false, true])(
+      'keeps an orchestrator’s send_to_worker /review as automation (queued: %s)',
+      async (queued) => {
+        trackBase();
+        const pull = reviewedRounds('acme/shop', 77, [head], { baseRef });
+        job.ownerId = 4;
+        job.parentId = 'orch-1';
+        job.reviewRequest = { source: 'orchestrator', requestedBy: 'session:orch-1', continuation: false };
+        if (queued) {
+          job.recoveryQueue = [
+            {
+              prompt: '/review',
+              shown: '/review',
+              files: [],
+              unattended: false,
+              automatic: false,
+              fromAgent: true,
+            },
+          ];
+          job.status = 'closed';
+          state.stored = [job];
+          await initJobs();
+          job = getJob(id);
+          job.status = 'idle';
+          sendDevMessage(id, 'Continue', undefined, { fromAgent: true });
+        } else sendDevMessage(id, '/review', undefined, { fromAgent: true });
+        await vi.waitFor(() => expect(job.error).toMatch(/automated review does not run twice/));
+        expect(claimCodeReviewRound.mock.calls[0][0]).toMatchObject({
+          source: 'orchestrator',
+          requestedBy: 'session:orch-1',
+        });
+        expect(invocations).toHaveLength(0);
+        expect(pull.count.rounds).toBe(1);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+      },
+    );
+
     it('measures the change without blocking the server, and widens when git does not answer in time', async () => {
       trackBase();
       const reviewedHead = commit('cart.js', 200, 'feature');
@@ -2738,7 +2845,7 @@ describe('native Codex code review', () => {
         baseRef,
       });
       job.reviewRequest = { source: 'babysitter', requestedBy: null, continuation: false };
-      sendDevMessage(id, '/review');
+      sendDevMessage(id, '/review', undefined, { unattended: true });
       await vi.waitFor(() => expect(job.error).toBeTruthy());
       expect(job.error).toContain('acme/shop PR #77 has used 3 of its 3 code review rounds');
       expect(job.error).toContain('nothing is labelled, approved or reported as passed');
