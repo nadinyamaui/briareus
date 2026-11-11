@@ -212,8 +212,10 @@ it('lists reviews stopped at their round limit to whoever may see the project, a
   try {
     // No session carries these, so no session's visibility hides them from an admin.
     expect(await ids(admin.call)).toEqual(['review-limit:acme/shop#7', 'review-limit:acme/site#9']);
+    expect(reviewLimits).toHaveBeenLastCalledWith(null);
     // A token held to one project sees that project's.
     expect(await ids(member.call)).toEqual(['review-limit:acme/shop#7']);
+    expect(reviewLimits).toHaveBeenLastCalledWith(['acme/shop']);
     const [item] = (await (await member.call('/api/operations/attention')).json()).items;
     expect(item).toMatchObject({ kind: 'review-limit', repo: 'acme/shop', prNumber: 7, sessionId: null });
   } finally {

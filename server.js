@@ -890,9 +890,10 @@ api.use(
     sshVisible: sshRuledBy,
     // A PR is open while the board lists it; the board is cached and mirrored, so this
     // costs no GitHub call on an ordinary poll.
-    reviewLimits: () =>
+    reviewLimits: (repos) =>
       reviewLimitsWaiting({
         getProject,
+        repos,
         isOpen: async (project, prNumber) =>
           (await projectPulls(project)).pulls.some((pr) => pr.number === prNumber),
       }),

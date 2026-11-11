@@ -279,8 +279,9 @@ session is running any more (its settling write was lost) is recorded as failed
 when the next round on the pull request is claimed.
 
 **Who asked.** The PR babysitter and an orchestrator's `start_pr_action` are
-automation; a review started through `POST /api/v1/actions` is a person's
-request. Every round counts, whoever asked. The difference is in what each may
+automation; a review started through `POST /api/v1/actions` or a person's typed
+`/review` is that person's request, even in an automation-created session.
+Every round counts, whoever asked. The difference is in what each may
 do at the limit and with a head that was already reviewed:
 
 | Request                         | Babysitter, orchestrator     | Person (`POST /actions`)        |

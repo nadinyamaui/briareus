@@ -961,6 +961,53 @@ describe('what waits on a person', () => {
     expect(view.unresolved.unverified.map((f) => f.findingRef)).toEqual(['r9']);
   });
 
+  it('filters scope and closed PRs before loading any review details', async () => {
+    await useUp();
+    await refusalOf(claim({ headSha: sha('d') }));
+    await useUp(8);
+    await refusalOf(claim({ prNumber: 8, headSha: sha('d') }));
+    store.pulls.set('acme/site#9', {
+      count: { repo: 'acme/site', prNumber: 9, rounds: 3, refusedAt: store.now() },
+      rounds: [],
+    });
+    listCodeReviewDecisions.mockClear();
+    listPullCodeReviews.mockClear();
+    const isOpen = vi.fn(async (_project, prNumber) => prNumber === 7);
+    const waiting = await reviewLimitsWaiting({ getProject, isOpen, repos: [repo] });
+    expect(waiting.map((r) => r.prNumber)).toEqual([7]);
+    expect(isOpen.mock.calls.map(([, number]) => number)).toEqual([7, 8]);
+    expect(listCodeReviewDecisions.mock.calls).toEqual([[repo, 7]]);
+    expect(listPullCodeReviews.mock.calls).toEqual([[repo, 7, 1]]);
+    isOpen.mockClear();
+    expect(await reviewLimitsWaiting({ getProject, isOpen, repos: [] })).toEqual([]);
+    expect(isOpen).not.toHaveBeenCalled();
+  });
+
+  it('bounds concurrent attention reads while preserving the refused PR order', async () => {
+    for (let prNumber = 1; prNumber <= 8; prNumber++) {
+      await useUp(prNumber);
+      await refusalOf(claim({ prNumber, headSha: sha('d') }));
+    }
+    let active = 0,
+      peak = 0;
+    const read = listCodeReviewDecisions.getMockImplementation();
+    listCodeReviewDecisions.mockImplementation(async (...args) => {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise((resolve) => setImmediate(resolve));
+      active--;
+      return read(...args);
+    });
+    try {
+      const waiting = await reviewLimitsWaiting({ getProject });
+      expect(waiting.map((r) => r.prNumber)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+      expect(peak).toBeLessThanOrEqual(2);
+      expect(waiting).toHaveLength(8);
+    } finally {
+      listCodeReviewDecisions.mockImplementation(read);
+    }
+  });
+
   it('stops listing one that was continued, closed, raised above its count or removed', async () => {
     await useUp();
     await refusalOf(claim({ headSha: sha('d'), jobId: 'job-d' }));
