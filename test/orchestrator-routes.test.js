@@ -13,9 +13,11 @@ let server,
   startOrchestratorPrAction,
   spawnWorkerSession;
 let deleteJobById, eligibleWorkerProjects, reopenDevSession, assertWorkerSlot;
+let sessions, foreign, closeDevSession, noteSession, ownerManages;
 beforeEach(async () => {
   worker = {
     id: 'w1',
+    kind: 'devchat',
     parentId: 'o1',
     qaLoop: { running: false, sessionId: null },
   };
@@ -38,7 +40,14 @@ beforeEach(async () => {
   setQaLoop = vi.fn((_id, on) => {
     worker.qaLoop = on ? { running: false } : null;
   });
-  const sessions = { o1: { id: 'o1', orchestrator: true }, o2: { id: 'o2', orchestrator: true }, w1: worker };
+  sessions = { o1: { id: 'o1', orchestrator: true }, o2: { id: 'o2', orchestrator: true }, w1: worker };
+  // A session the user started by hand, holding a pull request in the orchestrator's project.
+  foreign = { id: 's1', kind: 'devchat', repo: 'own/repo', status: 'idle', parentId: null };
+  closeDevSession = vi.fn(async (id) => {
+    if (id === foreign.id) foreign.status = 'closed';
+  });
+  noteSession = vi.fn();
+  ownerManages = vi.fn(() => true);
   startOrchestratorPrAction = vi.fn(async () => worker);
   spawnWorkerSession = vi.fn((parent, opts) => ({ ...worker, ...opts, parentId: parent.id }));
   deleteJobById = vi.fn(async () => {
@@ -64,7 +73,10 @@ beforeEach(async () => {
     },
     workerSessionsFor: (orchestrator) => (worker.parentId === orchestrator.id ? [worker] : []),
     setQaLoop,
-    getJob: (id) => (id === child.id ? child : null),
+    getJob: (id) => (id === child.id ? child : id === foreign.id ? foreign : sessions[id] || null),
+    closeDevSession,
+    noteSession,
+    ownerManages,
     workerTranscript,
     jobEventsFor,
     sendDevMessage,
@@ -78,6 +90,7 @@ beforeEach(async () => {
   app.post('/api/agent/sessions/:id/qa-loop', routes.qaLoop);
   app.post('/api/agent/sessions/:id/reopen', routes.reopenWorker);
   app.delete('/api/agent/sessions/:id', routes.deleteWorker);
+  app.post('/api/agent/sessions/:id/close', routes.closeSession);
   app.get('/api/agent/sessions', (req, res) => {
     const parent = routes.orchestratorSession(req, res);
     if (parent) res.json({ sessions: worker.parentId === parent.id ? [worker] : [] });
@@ -234,6 +247,96 @@ describe('scoped worker deletion', () => {
     expect(res.status).toBe(status);
     expect(await res.json()).toEqual({ error: 'refused' });
     expect(deleteJobById).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('closing sessions', () => {
+  const close = (token = 'o1', id = 's1', query = '') =>
+    fetch(`${base}/${id}/close${query}`, { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+  beforeEach(() => {
+    Object.assign(sessions.o1, { kind: 'devchat', repo: 'Own/Repo', title: 'Weekly work' });
+    Object.assign(sessions.o2, { kind: 'devchat', repo: 'other/repo' });
+  });
+  it('closes an own worker without a note, whatever its project', async () => {
+    worker.repo = 'authorized/companion';
+    const res = await close('o1', 'w1');
+    expect(res.status).toBe(200);
+    expect((await res.json()).session.id).toBe('w1');
+    expect(closeDevSession).toHaveBeenCalledExactlyOnceWith('w1');
+    expect(noteSession).not.toHaveBeenCalled();
+    expect(ownerManages).not.toHaveBeenCalled();
+  });
+  it('closes a session of its own project it did not start, and says so in its transcript', async () => {
+    const res = await close();
+    expect(res.status).toBe(200);
+    expect((await res.json()).session).toMatchObject({ id: 's1', status: 'closed' });
+    expect(ownerManages).toHaveBeenCalledWith(expect.objectContaining({ id: 'o1' }), foreign);
+    expect(noteSession).toHaveBeenCalledExactlyOnceWith(
+      's1',
+      'Closed by orchestrator session o1 (Weekly work).',
+    );
+    expect(closeDevSession).toHaveBeenCalledExactlyOnceWith('s1');
+  });
+  it('leaves an already closed session without a second note', async () => {
+    foreign.status = 'closed';
+    expect((await close()).status).toBe(200);
+    expect(noteSession).not.toHaveBeenCalled();
+  });
+  it('answers only the id and status of a session that is not its worker', async () => {
+    Object.assign(foreign, { title: 'Private title', lastText: 'secret' });
+    expect(await (await close()).json()).toEqual({ session: { id: 's1', status: 'closed' } });
+  });
+  it('notes nothing while a close already under way finishes', async () => {
+    foreign.closePending = true;
+    expect((await close()).status).toBe(200);
+    expect(closeDevSession).toHaveBeenCalledExactlyOnceWith('s1');
+    expect(noteSession).not.toHaveBeenCalled();
+  });
+  it('keeps close_worker to its own workers', async () => {
+    expect((await close('o1', 'w1', '?worker=1')).status).toBe(200);
+    expect((await close('o1', 's1', '?worker=1')).status).toBe(404);
+    expect(closeDevSession).toHaveBeenCalledExactlyOnceWith('w1');
+  });
+  it.each([
+    ['an unattended session, whose close deletes it', { autoClose: true }],
+    ['another orchestrator', { orchestrator: true }],
+  ])('refuses %s', async (_label, fields) => {
+    Object.assign(foreign, fields);
+    expect((await close()).status).toBe(404);
+    expect(closeDevSession).not.toHaveBeenCalled();
+  });
+  it.each([
+    ['invalid', 's1', 401],
+    ['w1', 's1', 403],
+    // Another project's orchestrator, the orchestrator itself, and ids that match nothing.
+    ['o2', 's1', 404],
+    ['o1', 'o1', 404],
+    ['o1', 'o2', 404],
+    ['o1', 'missing', 404],
+  ])('refuses %s closing %s', async (token, id, status) => {
+    expect((await close(token, id)).status).toBe(status);
+    expect(closeDevSession).not.toHaveBeenCalled();
+    expect(noteSession).not.toHaveBeenCalled();
+  });
+  it('refuses a session its owner could not close, with the answer a missing one gets', async () => {
+    ownerManages.mockReturnValue(false);
+    const refused = await close();
+    const missing = await close('o1', 'missing');
+    expect(refused.status).toBe(404);
+    expect((await refused.json()).error.replace('s1', 'missing')).toBe((await missing.json()).error);
+    expect(closeDevSession).not.toHaveBeenCalled();
+  });
+  it('refuses a session that is not a dev session', async () => {
+    foreign.kind = 'review';
+    expect((await close()).status).toBe(404);
+    expect(closeDevSession).not.toHaveBeenCalled();
+  });
+  it('reports a failed close', async () => {
+    closeDevSession.mockRejectedValue(new Error('database drop failed'));
+    const res = await close();
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'database drop failed' });
+    expect(noteSession).not.toHaveBeenCalled();
   });
 });
 
