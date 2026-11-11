@@ -1107,6 +1107,15 @@ describe('a review session’s history', () => {
     expect(reviewHistoryOf('job-1')).toBeNull();
   });
 
+  it('narrows a file that was already there to its owner before writing to it', async () => {
+    githubGraphql.mockResolvedValue(threadsPage([dismissedThread()]));
+    fs.writeFileSync(file, 'left by an earlier run');
+    fs.chmodSync(file, 0o644);
+    await loadReviewHistory(scope({ head }));
+    expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    expect(JSON.parse(fs.readFileSync(file, 'utf8')).threads).toHaveLength(1);
+  });
+
   it('will not follow a link planted where the file goes', async () => {
     githubGraphql.mockResolvedValue(threadsPage([]));
     const target = path.join(dir, 'elsewhere');
