@@ -557,6 +557,18 @@ describe('the risk the server reads for a revision', () => {
     expect(refreshCodeReviewOutcome).toHaveBeenCalledTimes(1);
   });
 
+  it('uses only the stored outcome row to learn an already-known revision', async () => {
+    reviewed();
+    const project = withPolicy();
+    await refresh(project, { current: { headSha: head, baseRef: 'main' } });
+    const { readCodeReviewOutcomeState, refreshCodeReviewOutcome } = await import('../lib/db.js');
+    readCodeReviewOutcomeState.mockClear();
+    refreshCodeReviewOutcome.mockClear();
+    await refresh(project);
+    expect(readCodeReviewOutcomeState).not.toHaveBeenCalled();
+    expect(refreshCodeReviewOutcome).toHaveBeenCalledTimes(1);
+  });
+
   it('starts independent file and commit reads together', async () => {
     const fetch = globalThis.fetch;
     let release;
@@ -874,6 +886,22 @@ describe('the risk the server reads for a revision', () => {
 });
 
 describe('the requirement beside the outcome', () => {
+  it('does not reuse authorship from another base in a read-only view', async () => {
+    reviewed();
+    const project = withPolicy();
+    await refresh(project, { current: { headSha: head, baseRef: 'main' } });
+    approve(1, { baseRef: 'release' });
+    const current = { headSha: head, baseRef: 'release' };
+    const read = await enforcement.readReviewOutcome(project, 7, { current });
+    expect(read.approvals.valid).toBe(0);
+    expect(read.approvals.approvals[0]).toMatchObject({ counted: false, reason: 'authorship_unknown' });
+    // Once the new base's commit list is read, it identifies the author normally.
+    github.pull.base.ref = 'release';
+    github.commits[0].author = { id: 101, login: 'ada-dev' };
+    const refreshed = await refresh(project, { current });
+    expect(refreshed.approvals.approvals[0]).toMatchObject({ counted: false, reason: 'own_change' });
+  });
+
   it('leaves the review outcome what it is: a missing approval is no finding and no failure', async () => {
     reviewed();
     const project = enforcing();
@@ -1377,6 +1405,60 @@ describe('a commit shared by several pull requests', () => {
     expect(store.row.publishError).toContain('success');
     expect(store.readiness.publishError).toContain('success');
   });
+
+  it.each([false, true])(
+    'drops a closed PR’s newly owed statuses before publication (previously published: %s)',
+    async (published) => {
+      trivial();
+      const project = enforcing();
+      await refresh(project, { current });
+      store.row.statusState = 'failure';
+      store.row.statusDescription = 'A required fix from a closed PR';
+      store.readiness.statusState = 'pending';
+      for (const row of [store.row, store.readiness]) {
+        row.publishOwedAt = store.now();
+        row.publishFailedAt = null;
+        row.publishedConfirmed = published;
+      }
+      github.pullsAt = (sha) => [{ number: 9, state: 'open', head: { sha } }];
+      github.openPulls = [{ number: 9, state: 'open', head: { sha: head } }];
+      requests.length = 0;
+      const isOpen = vi.fn(async () => false);
+      const results = await enforcement.retryReviewStatuses({ getProject: () => project, cfg, isOpen });
+      expect(results).toEqual([
+        { repo, prNumber: 7, published: false, skipped: 'closed' },
+        { repo, prNumber: 7, channel: 'approvals', published: false, skipped: 'closed' },
+      ]);
+      expect(isOpen).toHaveBeenCalled();
+      expect(posted()).toEqual([]);
+      expect(store.row.publishOwedAt).toBeNull();
+      expect(store.readiness.publishOwedAt).toBeNull();
+      expect(await sweep(project)).toEqual([]);
+    },
+  );
+
+  it.each([false, true])(
+    'excludes a closed publishing PR from live-head ranking (known sibling: %s)',
+    async (known) => {
+      trivial();
+      const project = enforcing();
+      await refresh(project, { current });
+      store.row.statusState = 'failure';
+      store.row.statusDescription = 'Closed PR failure';
+      github.pullsAt = (sha) => [{ number: 9, state: 'open', head: { sha } }];
+      github.openPulls = [{ number: 9, state: 'open', head: { sha: head } }];
+      if (known)
+        store.siblings.review = [{ sha: head, prNumber: 9, state: 'success', description: 'Open PR passed' }];
+      requests.length = 0;
+      await enforcement.publishReviewStatus(project, 7, { cfg });
+      expect(posted('briareus/code-review')).toEqual([
+        expect.objectContaining({
+          state: known ? 'success' : 'pending',
+          description: expect.stringMatching(/^PR #9: /),
+        }),
+      ]);
+    },
+  );
 
   it('leaves out pull requests that closed or merely contain the commit', async () => {
     trivial();

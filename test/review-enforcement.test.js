@@ -1042,11 +1042,10 @@ describe('what is owed and swept', () => {
     expect(posted()).toHaveLength(1);
   });
 
-  it('gives up a failing status of a pull request that closed, and still makes the first attempt', async () => {
+  it('drops a closed pull request’s debt before the first attempt and retries when its state is unreadable', async () => {
     reviewed();
     const closed = { isOpen: async () => false };
-    // Owed and never tried: sent, closed or not. A status on a closed pull request's
-    // head harms nobody, and the board may simply not list the pull request.
+    // A closed PR can share a head with a live one: even a first write is skipped.
     await refreshCodeReviewOutcome(repo, 7, {}, () => ({
       outcome: 'passed',
       stale: false,
@@ -1057,18 +1056,10 @@ describe('what is owed and swept', () => {
       statusDescription: 'Review passed',
       owed: true,
     }));
-    answers = [answer(403, { message: 'Forbidden' })];
-    const [first] = await sweep(closed);
-    expect(first).toMatchObject({ published: false });
-    expect(first.error).toContain('GitHub answered 403');
-    expect(posted()).toHaveLength(1);
-    // It failed, and the pull request is closed: nobody is waiting for that status.
-    const due = Date.parse(store.row.publishRetryAt);
-    expect(await sweep({ ...closed, now: () => due })).toEqual([
-      { repo, prNumber: 7, published: false, skipped: 'closed' },
-    ]);
+    expect(await sweep(closed)).toEqual([{ repo, prNumber: 7, published: false, skipped: 'closed' }]);
     expect(store.row).toMatchObject({ publishFailedAt: null, publishOwedAt: null });
-    expect(posted()).toHaveLength(1);
+    expect(posted()).toEqual([]);
+    expect(await sweep(closed)).toEqual([]);
     // A board that cannot say reads as open: the retry goes on.
     answers = [answer(403, { message: 'Forbidden' })];
     await refresh(on);

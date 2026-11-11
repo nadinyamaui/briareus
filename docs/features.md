@@ -561,8 +561,8 @@ On:
   due: a write that failed, one that was never made because the server stopped
   between storing and sending, and an outcome whose recomputation did not land.
   It drops what nobody is owed any more: the debt of a project that is gone or
-  no longer enforces, and a failing status of a pull request that has closed
-  (the first attempt is always made). A status GitHub answers 422 to, because
+  no longer enforces, and any status of a pull request that has closed
+  (checked before the first attempt too). A status GitHub answers 422 to, because
   the commit is gone or holds all the statuses a context may have, is tried
   five times and then left with its error.
 - While GitHub is not known to carry the stored outcome, `status.published` is
