@@ -5165,59 +5165,129 @@ describe('native Codex code review', () => {
         await vi.waitFor(() => expect(job.status).toBe('idle'));
       });
 
-      it('puts on record whose session made which commit, whatever the session was started for', async () => {
-        // A review session, which is as able to commit as any: its owner tells it to.
-        job.ownerId = 4;
-        recordCodeReviewCommitOwners.mockClear();
-        changes(['src/cart.js']);
-        stored();
-        // A turn in which nothing is committed records nothing.
-        sendDevMessage(id, '/review');
-        await vi.waitFor(() => expect(invocations).toHaveLength(1));
-        cancelDevTurn(id);
-        invocations[0].child.emit('close', null);
-        await vi.waitFor(() => expect(job.status).toBe('idle'));
-        expect(job).not.toHaveProperty('commitWatch');
-        expect(recordCodeReviewCommitOwners).not.toHaveBeenCalled();
-        sendDevMessage(id, '/review');
-        await vi.waitFor(() => expect(invocations).toHaveLength(2));
-        // Noted when the turn started, kept with the session and never shown to a client.
-        expect(job.commitWatch).toMatchObject({ head });
-        expect(publicJob(job)).not.toHaveProperty('commitWatch');
-        // While the turn runs the agent commits in the checkout.
-        const commit = (message) =>
-          spawnSync('git', [
-            '-C',
-            root,
-            '-c',
-            'user.name=Server',
-            '-c',
-            'user.email=server@example.com',
-            'commit',
-            '--allow-empty',
-            '-m',
-            message,
-          ]);
-        commit('One');
-        commit('Two');
-        const made = spawnSync('git', ['-C', root, 'rev-list', `${head}..HEAD`], { encoding: 'utf8' })
-          .stdout.trim()
-          .split('\n');
-        expect(made).toHaveLength(2);
-        cancelDevTurn(id);
-        invocations[1].child.emit('close', null);
-        await vi.waitFor(() => expect(job.status).toBe('idle'));
-        await vi.waitFor(() =>
-          expect(recordCodeReviewCommitOwners).toHaveBeenCalledWith('acme/shop', {
-            userId: 4,
-            jobId: id,
-            branch: 'feature',
-            shas: made,
-          }),
-        );
-        expect(job).not.toHaveProperty('commitWatch');
-        delete job.ownerId;
-      });
+      it.each([false, true])(
+        'records newly reachable commits independent of backdating (%s)',
+        async (backdated) => {
+          // A review session, which is as able to commit as any: its owner tells it to.
+          job.ownerId = 4;
+          recordCodeReviewCommitOwners.mockClear();
+          changes(['src/cart.js']);
+          stored();
+          // A turn in which nothing is committed records nothing.
+          sendDevMessage(id, '/review');
+          await vi.waitFor(() => expect(invocations).toHaveLength(1));
+          cancelDevTurn(id);
+          invocations[0].child.emit('close', null);
+          await vi.waitFor(() => expect(job.status).toBe('idle'));
+          expect(job).not.toHaveProperty('commitWatch');
+          expect(recordCodeReviewCommitOwners).not.toHaveBeenCalled();
+          sendDevMessage(id, '/review');
+          await vi.waitFor(() => expect(invocations).toHaveLength(2));
+          // Noted when the turn started, kept with the session and never shown to a client.
+          expect(job.commitWatch).toMatchObject({ head });
+          expect(publicJob(job)).not.toHaveProperty('commitWatch');
+          // While the turn runs the agent commits in the checkout.
+          const commit = (message) =>
+            spawnSync(
+              'git',
+              [
+                '-C',
+                root,
+                '-c',
+                'user.name=Server',
+                '-c',
+                'user.email=server@example.com',
+                'commit',
+                '--allow-empty',
+                '-m',
+                message,
+              ],
+              {
+                env: { ...process.env, ...(backdated ? { GIT_COMMITTER_DATE: '2020-01-01T00:00:00Z' } : {}) },
+              },
+            );
+          commit('One');
+          commit('Two');
+          // A base commit created elsewhere during this turn, merged into the checkout.
+          const tree = spawnSync('git', ['-C', root, 'rev-parse', `${head}^{tree}`], {
+            encoding: 'utf8',
+          }).stdout.trim();
+          const imported = spawnSync(
+            'git',
+            [
+              '-C',
+              root,
+              '-c',
+              'user.name=Other',
+              '-c',
+              'user.email=other@example.com',
+              'commit-tree',
+              tree,
+              '-p',
+              head,
+              '-m',
+              'Imported base',
+            ],
+            { encoding: 'utf8' },
+          ).stdout.trim();
+          expect(imported).toMatch(/^[0-9a-f]{40}$/);
+          expect(
+            spawnSync('git', [
+              '-C',
+              root,
+              '-c',
+              'user.name=Server',
+              '-c',
+              'user.email=server@example.com',
+              'merge',
+              '--no-ff',
+              imported,
+              '-m',
+              'Merge base',
+            ]).status,
+          ).toBe(0);
+          // Locally authored commits on a merged side branch still belong to this owner.
+          expect(spawnSync('git', ['-C', root, 'checkout', '-b', 'local-work']).status).toBe(0);
+          commit('Three');
+          expect(spawnSync('git', ['-C', root, 'checkout', 'feature']).status).toBe(0);
+          expect(
+            spawnSync('git', [
+              '-C',
+              root,
+              '-c',
+              'user.name=Server',
+              '-c',
+              'user.email=server@example.com',
+              'merge',
+              '--no-ff',
+              'local-work',
+              '-m',
+              'Merge local work',
+            ]).status,
+          ).toBe(0);
+          const made = spawnSync('git', ['-C', root, 'rev-list', `${head}..HEAD`], {
+            encoding: 'utf8',
+          })
+            .stdout.trim()
+            .split('\n');
+          expect(made).toHaveLength(6);
+          // Base-only SHAs are filtered by the actual PR commit list when workers are read.
+          expect(made).toContain(imported);
+          cancelDevTurn(id);
+          invocations[1].child.emit('close', null);
+          await vi.waitFor(() => expect(job.status).toBe('idle'));
+          await vi.waitFor(() =>
+            expect(recordCodeReviewCommitOwners).toHaveBeenCalledWith('acme/shop', {
+              userId: 4,
+              jobId: id,
+              branch: 'feature',
+              shas: made,
+            }),
+          );
+          expect(job).not.toHaveProperty('commitWatch');
+          delete job.ownerId;
+        },
+      );
 
       it('keeps no such record for a session nobody owns, or a project without a policy', async () => {
         recordCodeReviewCommitOwners.mockClear();

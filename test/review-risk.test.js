@@ -22,6 +22,10 @@ describe('the glob syntax of a sensitive-path rule', () => {
   it.each([
     // A single name is looked for at every depth, and covers what lies beneath it.
     ['*.pem', 'server.pem', true],
+    ['*.pem', '*key.pem', true],
+    ['*.pem', 'a/*key.pem', true],
+    ['config/*secret*', 'config/*xsecret', true],
+    ['*.pem', '*key.txt', false],
     ['*.pem', 'deploy/certs/server.pem', true],
     ['*.pem', 'deploy/certs/server.pem.txt', false],
     ['*.pem', 'certs.pem/README', true],
@@ -311,6 +315,15 @@ describe('the risk of a change', () => {
     });
   });
 
+  it('keeps literal stars in filenames subject to the approval rule', () => {
+    expect(assessRisk({ policy, files: [file('a/*key.pem')] })).toMatchObject({
+      tier: 'high',
+      approvals: 3,
+      requireSecurity: true,
+      unknown: false,
+    });
+  });
+
   it('counts a rename out of a sensitive path as much as one into it', () => {
     const out = assessRisk({
       policy,
@@ -497,6 +510,8 @@ describe('the assessment that stands for a revision', () => {
   it('is unknown, and so the highest tier, for any other revision or policy', () => {
     for (const [record, revision, why] of [
       [null, { headSha: head, baseRef: 'main' }, 'not_assessed'],
+      [{ ...stored, baseRef: null }, { headSha: head, baseRef: 'main' }, 'not_assessed'],
+      [{ ...stored, baseRef: null }, { headSha: head }, 'not_assessed'],
       [stored, { headSha: 'b'.repeat(40), baseRef: 'main' }, 'not_assessed'],
       [stored, { headSha: head, baseRef: 'release' }, 'not_assessed'],
       [stored, { headSha: null }, 'not_assessed'],

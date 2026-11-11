@@ -24,6 +24,36 @@ describe('the GitHub accounts users have linked', () => {
     }
   });
 
+  it('persists new links even when old history failed to load, keeping reads closed until recovery', async () => {
+    const load = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('History unavailable'))
+      .mockImplementation(async () => stored);
+    links = createGithubLinks({ load, save });
+    await expect(links.init()).rejects.toThrow('History unavailable');
+    await links.remember(2, { id: 102, login: 'grace-dev' });
+    expect(save).toHaveBeenCalledWith(2, { id: 102, login: 'grace-dev' });
+    expect(() => links.all()).toThrow(/unavailable/);
+    await links.init();
+    expect(links.of(2)).toEqual([{ id: 102, login: 'grace-dev' }]);
+  });
+
+  it('retains links saved while a history snapshot was loading', async () => {
+    let finish;
+    links = createGithubLinks({
+      load: () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+      save,
+    });
+    const loading = links.init();
+    await links.remember(2, { id: 102, login: 'grace-dev' });
+    finish([]);
+    await loading;
+    expect(links.of(2)).toEqual([{ id: 102, login: 'grace-dev' }]);
+  });
+
   it('keeps every account a user linked, entered once, after it is unlinked', async () => {
     await links.init();
     expect(links.of(1)).toEqual([{ id: 101, login: 'ada-dev' }]);

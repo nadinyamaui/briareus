@@ -480,7 +480,7 @@ describe('who counts as a person approving', () => {
       ['former-owner', false, 'review_label_step'],
       ['drive-by', false, 'not_a_collaborator'],
       ['first-timer', false, 'not_a_collaborator'],
-      ['octo-member', true, null],
+      ['octo-member', false, 'not_a_collaborator'],
     ]);
     expect(state.approvals[0].message).toBe(
       'Approval by Ada-Dev not counted: the account is used by Briareus sessions, so an approval from it on GitHub may be automation’s; its owner can record the approval through the Briareus API.',
@@ -488,7 +488,7 @@ describe('who counts as a person approving', () => {
     expect(state.approvals[4].message).toBe(
       'Approval by former-owner not counted: it was submitted by a code review’s own label step.',
     );
-    expect(state.valid).toBe(1);
+    expect(state.valid).toBe(0);
   });
 
   it('lets the owner of a linked account approve through the API instead', () => {

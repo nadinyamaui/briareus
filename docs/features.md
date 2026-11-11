@@ -1095,10 +1095,12 @@ it and the accounts on its commits. An approver is tied to it when:
 - a session they own made commits of it. For a project with an approval
   policy, the server notes the checkout's `HEAD` when a turn of an owned
   session starts and again when it ends, and records the commits that came in
-  between and were made since the turn began as that user's
-  (`code_review_commit_owners`). That holds whatever the session was started
-  for (a review session told to commit is a session that committed), wherever
-  it goes afterwards, and after it is deleted. Workers an orchestrator starts
+  between as that user's (`code_review_commit_owners`), conservatively and
+  independent of their commit dates or reflog messages. Only commits in GitHub's
+  PR commit list can tie that user to its approvals, so merged base-only commits
+  do not count. That holds whatever the session was started for (a review session
+  told to commit is a session that committed), wherever it goes afterwards, and
+  after it is deleted. Workers an orchestrator starts
   belong to the orchestrator's owner. For work from before commits were
   recorded, the session whose own branch became the pull request ties its
   owner when an approval is recorded, while the server still has that session.
@@ -1259,9 +1261,10 @@ ever linked is taken for a person's when the project accepts those; whether a
 person or their own tooling used that account is not something the server can
 see, nor that it belongs to somebody who also approved through the API under
 another account. GitHub reports org membership, not write access, as `MEMBER`:
-a repository that needs approvers with write access requires that in its own
-branch protection. A GitHub approval is bound to the base branch the pull
-request had when the server first saw the approval, not when it was submitted.
+these reviewers count only after the server verifies their repository push
+permission; a failed permission read counts no GitHub approvals until retried.
+A GitHub approval is bound to the base branch the pull request had when the
+server first saw the approval, not when it was submitted.
 An approver who loses access stops counting in the API at once and on GitHub at
 the next computation. The published status follows a change within about a
 minute, longer if the sweep cannot reach GitHub; a second pull request opened

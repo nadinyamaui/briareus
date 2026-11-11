@@ -652,6 +652,13 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('risk-based approvals on 
     await refresh(withPolicy, 26, { current });
     await addCodeReviewApproval(repo, 26, approval(2, 'a'));
     expect((await refresh(withPolicy, 26)).approvals).toMatchObject({ valid: 1, result: 'satisfied' });
+    // A merged base-only commit attributed conservatively to this session cannot
+    // disqualify the user: only GitHub's actual PR commit SHAs are consulted.
+    await recordCodeReviewCommitOwners(repo, { userId: 2, jobId: 'base-import', shas: [sha('b')] });
+    expect((await readReviewOutcome(withPolicy, 26)).approvals).toMatchObject({
+      valid: 1,
+      result: 'satisfied',
+    });
     // The record of the commit arrives after the head was first read: the session's turn
     // ended later. It is found all the same, without the head being read again.
     await recordCodeReviewCommitOwners(repo, { userId: 2, jobId: 'job-26', shas: [review.head] });

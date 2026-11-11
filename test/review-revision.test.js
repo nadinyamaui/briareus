@@ -369,6 +369,7 @@ beforeEach(async () => {
     // The open pull requests at a commit; this one alone unless a test says otherwise.
     pullsAt: null,
     reviews: [],
+    permissions: {},
     user: { login: 'briareus-bot' },
     // Set to a status, or to a function, to make that read fail.
     failing: {},
@@ -394,6 +395,8 @@ beforeEach(async () => {
             github.pullsAt ? github.pullsAt(at) : [{ number: 7, state: 'open', head: { sha: at } }],
           );
         }
+        const member = /\/collaborators\/([^/]+)\/permission/.exec(path)?.[1];
+        if (member) return answer(200, github.permissions[member] || { permission: 'read' });
         const page = Number(/[?&]page=(\d+)/.exec(path)?.[1] || 1);
         const paged = (list) => answer(200, list.slice((page - 1) * 100, page * 100));
         const what = path === '/user' ? 'user' : /\/pulls\/7\/(\w+)/.exec(path)?.[1] || 'pull';
@@ -544,6 +547,52 @@ describe('the risk the server reads for a revision', () => {
     expect(store.risk).toMatchObject({ headSha: head, tier: 'high', complete: true });
     expect(outcome.approvals).toMatchObject({ tier: 'high', required: 2 });
     expect(outcome.approvals.risk.unknown).toBe(false);
+    const { refreshCodeReviewOutcome } = await import('../lib/db.js');
+    expect(refreshCodeReviewOutcome).toHaveBeenCalledTimes(1);
+  });
+
+  it('starts independent file and commit reads together', async () => {
+    const fetch = globalThis.fetch;
+    let release;
+    const blocked = new Promise((resolve) => {
+      release = resolve;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url, init) => {
+        if (url.includes('/files?')) await blocked;
+        return fetch(url, init);
+      }),
+    );
+    const pending = revision.readRevisionFacts(cfg, repo, 7, { headSha: head });
+    try {
+      await vi.waitFor(() => expect(asked('/commits?')).toHaveLength(1));
+    } finally {
+      release();
+    }
+    expect(await pending).toMatchObject({ complete: true, authors: { complete: true } });
+  });
+
+  it('does not reuse an assessment whose base was unknown', async () => {
+    await refresh(withPolicy(), { current: { headSha: head, baseRef: 'main' } });
+    store.risk.baseRef = null;
+    github.files = changed('README.md');
+    const result = await refresh(withPolicy(), { current: { headSha: head, baseRef: 'main' } });
+    expect(asked('/files?')).toHaveLength(2);
+    expect(result.approvals.risk).toMatchObject({ tier: 'low', unknown: false });
+  });
+
+  it('rejects facts read across a retarget, and retries for the new base', async () => {
+    const pull = github.pull;
+    let reads = 0;
+    github.pull = () => ({ ...pull, base: { ref: ++reads === 1 ? 'main' : 'release' } });
+    const project = withPolicy();
+    await refresh(project, { current: { headSha: head, baseRef: 'main' } });
+    expect(store.risk).toMatchObject({ complete: false, attempts: 1 });
+    github.pull = { ...pull, base: { ref: 'release' } };
+    github.files = changed('README.md');
+    await refresh(project, { current: { headSha: head, baseRef: 'release' } });
+    expect(store.risk).toMatchObject({ baseRef: 'release', complete: true, tier: 'low' });
   });
 
   it('reads every page, with the previous path of a renamed file', async () => {
@@ -1448,6 +1497,72 @@ describe('approvals given on GitHub', () => {
     // Ada records hers through the API instead, and that one counts.
     approve(1);
     expect((await refresh(project)).approvals).toMatchObject({ valid: 2, result: 'satisfied' });
+  });
+
+  it('checks MEMBER push access and refreshes it after access is revoked', async () => {
+    reviewed();
+    const project = withPolicy({ acceptGithubApprovals: true });
+    github.reviews = [
+      review(1, 'read-member', 'APPROVED', { author_association: 'MEMBER' }),
+      review(2, 'write-member', 'APPROVED', { author_association: 'MEMBER' }),
+    ];
+    github.permissions['write-member'] = { permission: 'write' };
+    let result = await refresh(project);
+    expect(result.approvals.approvals.map((a) => [a.by.name, a.counted])).toEqual([
+      ['read-member', false],
+      ['write-member', true],
+    ]);
+    github.permissions['write-member'] = { permission: 'read' };
+    result = await refresh(project);
+    expect(result.approvals.valid).toBe(0);
+  });
+
+  it('counts no GitHub approvals when MEMBER permission cannot be verified', async () => {
+    reviewed();
+    github.reviews = [review(1, 'member', 'APPROVED', { author_association: 'MEMBER' })];
+    const fetch = globalThis.fetch;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url, init) => (url.includes('/permission') ? Promise.resolve(answer(503)) : fetch(url, init))),
+    );
+    const result = await refresh(withPolicy({ acceptGithubApprovals: true }));
+    expect(result.approvals.valid).toBe(0);
+    expect(store.risk).toMatchObject({ reviewsSyncedAt: null, attempts: 1 });
+    expect(store.risk.retryAt).toBeTruthy();
+  });
+
+  it('computes only once when refreshing GitHub reviews without a supplied revision', async () => {
+    reviewed();
+    github.reviews = [review(1, 'octo-reviewer')];
+    const result = await refresh(withPolicy({ acceptGithubApprovals: true }));
+    const { refreshCodeReviewOutcome } = await import('../lib/db.js');
+    expect(refreshCodeReviewOutcome).toHaveBeenCalledTimes(1);
+    expect(asked('/reviews?')).toHaveLength(1);
+    expect(result.approvals.valid).toBe(1);
+  });
+
+  it('clears reviews-only retries once GitHub approvals are disabled', async () => {
+    reviewed();
+    const project = enforcing({ acceptGithubApprovals: true });
+    github.failing.reviews = 502;
+    await refresh(project, { current: { headSha: head, baseRef: 'main' } });
+    const due = Date.parse(store.risk.retryAt) + 1;
+    expect(store.risk).toMatchObject({ attempts: 1 });
+    const disabled = enforcing({ acceptGithubApprovals: false });
+    const reads = requests.length;
+    await revision.observeRevision(disabled, 7, { headSha: head, baseRef: 'main' }, { cfg, now: () => due });
+    expect(requests).toHaveLength(reads);
+    expect(store.risk).toMatchObject({ attempts: 0, retryAt: null, error: null });
+    const { saveCodeReviewRisk } = await import('../lib/db.js');
+    saveCodeReviewRisk.mockClear();
+    await revision.observeRevision(
+      disabled,
+      7,
+      { headSha: head, baseRef: 'main' },
+      { cfg, now: () => due + 60000 },
+    );
+    expect(saveCodeReviewRisk).not.toHaveBeenCalled();
+    expect(await sweep(disabled, due + 120000)).toEqual([]);
   });
 
   it('never counts the approval a review’s own label step submitted, even once the account is no longer linked', async () => {
