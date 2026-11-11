@@ -3197,53 +3197,61 @@ describe('native Codex code review', () => {
       await vi.waitFor(() => expect(job.status).toBe('idle'));
     });
 
-    it('does not run the label step when its start cannot be recorded, so the findings stay closed', async () => {
-      state.projects[0].enforceReviewOutcome = true;
-      stored();
-      github();
-      // The stage record is what closes the findings to the review from this step on
-      // (reviewFindingsFrozen). Its write fails: a database hiccup at the wrong moment.
-      const record = setCodeReviewStage.getMockImplementation();
-      setCodeReviewStage.mockImplementation(async (jobId, name, headSha, seen) => {
-        if (name === 'label' && seen.status === 'running') throw new Error('Lock wait timeout exceeded');
-        return record(jobId, name, headSha, seen);
-      });
-      const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
-      try {
-        await discover();
-        finishTurn(await turn(1));
-        finishTurn(await turn(2));
-        await vi.waitFor(() => expect(failCodeReview).toHaveBeenCalledWith(id));
-        // The step was never handed to the agent: it could not have been told the
-        // outcome while still able to write itself the evidence that outcome misses.
-        expect(invocations).toHaveLength(3);
-        expect(job.error).toContain('The label step could not be recorded as started, so it was not run');
-        expect(job.codeReviewRecord.labelAt).toBeUndefined();
-        await vi.waitFor(() => expect(state.outcome.row.outcome).toBe('incomplete'));
-        expect(state.outcome.row.reasons.map((r) => [r.code, r.stage])).toEqual([['stage_not_run', 'label']]);
-        await vi.waitFor(() =>
-          expect(statuses()).toEqual([
-            [head, 'pending'],
-            [head, 'error'],
-          ]),
-        );
-        await vi.waitFor(() => expect(job.status).toBe('idle'));
-        // A project that does not enforce the outcome freezes nothing, and its review
-        // goes on as it always did when a record could not be written.
-        state.projects[0].enforceReviewOutcome = false;
-        failCodeReview.mockClear();
-        sendDevMessage(id, '/review');
-        await vi.waitFor(() => expect(invocations).toHaveLength(4));
-        fs.writeFileSync(summaryPath, 'A candidate finding');
-        finishReview(invocations[3]);
-        for (let i = 4; i <= 6; i++) finishTurn(await turn(i));
-        await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
-        expect(failCodeReview).not.toHaveBeenCalled();
-      } finally {
-        setCodeReviewStage.mockImplementation(record);
-        logged.mockRestore();
-      }
-    });
+    it.each(['throws', 'matches no row'])(
+      'does not run the label step when its start %s, so the findings stay closed',
+      async (failure) => {
+        state.projects[0].enforceReviewOutcome = true;
+        stored();
+        github();
+        // The stage record is what closes the findings to the review from this step on
+        // (reviewFindingsFrozen). Its write fails: a database hiccup at the wrong moment.
+        const record = setCodeReviewStage.getMockImplementation();
+        setCodeReviewStage.mockImplementation(async (jobId, name, headSha, seen) => {
+          if (name === 'label' && seen.status === 'running') {
+            if (failure === 'matches no row') return false;
+            throw new Error('Lock wait timeout exceeded');
+          }
+          return record(jobId, name, headSha, seen);
+        });
+        const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try {
+          await discover();
+          finishTurn(await turn(1));
+          finishTurn(await turn(2));
+          await vi.waitFor(() => expect(failCodeReview).toHaveBeenCalledWith(id));
+          // The step was never handed to the agent: it could not have been told the
+          // outcome while still able to write itself the evidence that outcome misses.
+          expect(invocations).toHaveLength(3);
+          expect(job.error).toContain('The label step could not be recorded as started, so it was not run');
+          expect(job.codeReviewRecord.labelAt).toBeUndefined();
+          await vi.waitFor(() => expect(state.outcome.row.outcome).toBe('incomplete'));
+          expect(state.outcome.row.reasons.map((r) => [r.code, r.stage])).toEqual([
+            ['stage_not_run', 'label'],
+          ]);
+          await vi.waitFor(() =>
+            expect(statuses()).toEqual([
+              [head, 'pending'],
+              [head, 'error'],
+            ]),
+          );
+          await vi.waitFor(() => expect(job.status).toBe('idle'));
+          // A project that does not enforce the outcome freezes nothing, and its review
+          // goes on as it always did when a record could not be written.
+          state.projects[0].enforceReviewOutcome = false;
+          failCodeReview.mockClear();
+          sendDevMessage(id, '/review');
+          await vi.waitFor(() => expect(invocations).toHaveLength(4));
+          fs.writeFileSync(summaryPath, 'A candidate finding');
+          finishReview(invocations[3]);
+          for (let i = 4; i <= 6; i++) finishTurn(await turn(i));
+          await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
+          expect(failCodeReview).not.toHaveBeenCalled();
+        } finally {
+          setCodeReviewStage.mockImplementation(record);
+          logged.mockRestore();
+        }
+      },
+    );
 
     it('takes the pass away when the reviewed pull request is retargeted or pushed to', async () => {
       state.projects[0].enforceReviewOutcome = true;
