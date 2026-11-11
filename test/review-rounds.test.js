@@ -94,11 +94,16 @@ vi.mock('../lib/db.js', () => ({
   listCodeReviewDecisions: vi.fn(async (repo, prNumber) =>
     store.decisions.filter((d) => d.repo === repo && d.prNumber === prNumber),
   ),
-  listPullCodeReviews: vi.fn(async (repo, prNumber, limit) =>
-    store.reviews.filter((r) => r.repo === repo && r.prNumber === prNumber).slice(0, limit),
+  listPullCodeReviews: vi.fn(async (repo, prNumber, limit, { completed = false } = {}) =>
+    store.reviews
+      .filter((r) => r.repo === repo && r.prNumber === prNumber)
+      .filter((r) => !completed || r.status === 'completed')
+      .slice(0, limit),
   ),
-  listRefusedCodeReviewRounds: vi.fn(async () =>
-    [...store.pulls.values()].filter((p) => p.count.refusedAt).map((p) => ({ ...p.count })),
+  listRefusedCodeReviewRounds: vi.fn(async ({ repos = null } = {}) =>
+    [...store.pulls.values()]
+      .filter((p) => p.count.refusedAt && (!repos || repos.includes(p.count.repo)))
+      .map((p) => ({ ...p.count })),
   ),
   codeReviewDecisionsSince: vi.fn(async () => Date.UTC(2026, 10, 1)),
 }));
@@ -946,9 +951,12 @@ describe('what waits on a person', () => {
     await refusalOf(claim({ headSha: sha('d'), jobId: 'job-d' }));
     store.decisions = [decision({ findingRef: 'r1', threadId: 'T1', verdict: 'fix' })];
     store.reviews = [
+      // The refused session's own row is newer, and holds no findings of its own.
+      { repo, prNumber: 7, status: 'failed', findings: [] },
       {
         repo,
         prNumber: 7,
+        status: 'completed',
         findings: [
           { findingRef: 'r1', shouldFix: null, title: 'Has its decision' },
           { findingRef: 'r9', shouldFix: null, title: 'Never published' },
@@ -959,6 +967,9 @@ describe('what waits on a person', () => {
     expect(waiting).toMatchObject({ fix: 1, unverified: 1 });
     const view = await readReviewRounds(projects[0], 7);
     expect(view.unresolved.unverified.map((f) => f.findingRef)).toEqual(['r9']);
+    store.reviews[0].status = 'running';
+    const refused = await refusalOf(claim({ headSha: sha('e'), jobId: 'job-e' }));
+    expect(refused.reviewRounds.unresolved.unverified.map((f) => f.findingRef)).toEqual(['r9']);
   });
 
   it('filters scope and closed PRs before loading any review details', async () => {
@@ -977,7 +988,7 @@ describe('what waits on a person', () => {
     expect(waiting.map((r) => r.prNumber)).toEqual([7]);
     expect(isOpen.mock.calls.map(([, number]) => number)).toEqual([7, 8]);
     expect(listCodeReviewDecisions.mock.calls).toEqual([[repo, 7]]);
-    expect(listPullCodeReviews.mock.calls).toEqual([[repo, 7, 1]]);
+    expect(listPullCodeReviews.mock.calls).toEqual([[repo, 7, 1, { completed: true }]]);
     isOpen.mockClear();
     expect(await reviewLimitsWaiting({ getProject, isOpen, repos: [] })).toEqual([]);
     expect(isOpen).not.toHaveBeenCalled();

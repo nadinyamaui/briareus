@@ -2317,6 +2317,43 @@ describe('native Codex code review', () => {
       },
     );
 
+    it.each([false, true])(
+      'keeps an orchestrator’s send_to_worker /review as automation (queued: %s)',
+      async (queued) => {
+        trackBase();
+        const pull = reviewedRounds('acme/shop', 77, [head], { baseRef });
+        job.ownerId = 4;
+        job.parentId = 'orch-1';
+        job.reviewRequest = { source: 'orchestrator', requestedBy: 'session:orch-1', continuation: false };
+        if (queued) {
+          job.recoveryQueue = [
+            {
+              prompt: '/review',
+              shown: '/review',
+              files: [],
+              unattended: false,
+              automatic: false,
+              fromAgent: true,
+            },
+          ];
+          job.status = 'closed';
+          state.stored = [job];
+          await initJobs();
+          job = getJob(id);
+          job.status = 'idle';
+          sendDevMessage(id, 'Continue', undefined, { fromAgent: true });
+        } else sendDevMessage(id, '/review', undefined, { fromAgent: true });
+        await vi.waitFor(() => expect(job.error).toMatch(/automated review does not run twice/));
+        expect(claimCodeReviewRound.mock.calls[0][0]).toMatchObject({
+          source: 'orchestrator',
+          requestedBy: 'session:orch-1',
+        });
+        expect(invocations).toHaveLength(0);
+        expect(pull.count.rounds).toBe(1);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+      },
+    );
+
     it('measures the change without blocking the server, and widens when git does not answer in time', async () => {
       trackBase();
       const reviewedHead = commit('cart.js', 200, 'feature');
