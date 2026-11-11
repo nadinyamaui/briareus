@@ -67,6 +67,20 @@ vi.mock('../lib/db.js', () => ({
     };
     const state = store.state(reviewId);
     const { owed, ...next } = compute(state);
+    if (
+      !store.settled(store.row, {
+        sha: next.headSha,
+        state: next.statusState,
+        description: next.statusDescription,
+      })
+    )
+      Object.assign(store.row, {
+        publishAttempts: 0,
+        publishError: null,
+        publishErrorStatus: null,
+        publishFailedAt: null,
+        publishRetryAt: null,
+      });
     // One transaction: the outcome, the debt it creates and the recomputation it settles.
     Object.assign(store.row, next, {
       codeReviewId: state.review?.id ?? null,
@@ -100,7 +114,8 @@ vi.mock('../lib/db.js', () => ({
       publishOwedAt: store.settled(store.row, status) ? null : store.row.publishOwedAt,
     });
   }),
-  recordCodeReviewStatusFailed: vi.fn(async (_repo, _pr, { error, status = null, retryAt }) => {
+  recordCodeReviewStatusFailed: vi.fn(async (_repo, _pr, { error, status = null, retryAt }, attempted) => {
+    if (!store.settled(store.row, attempted)) return;
     Object.assign(store.row, {
       publishError: error,
       publishErrorStatus: status,
@@ -629,6 +644,12 @@ describe('the commit status', () => {
     answers = [answer(500), answer(500), answer(500)];
     const { outcome, published } = await enforcement.refreshReviewOutcome(on, 7, { cfg, retryDelayMs: 0 });
     expect(await published).toEqual({ published: false, error: 'GitHub answered 500' });
+    expect(recordCodeReviewStatusFailed).toHaveBeenLastCalledWith(
+      repo,
+      7,
+      { error: 'GitHub answered 500', status: 500, retryAt: expect.any(Number) },
+      { sha: head, state: 'success', description: outcome.status.description },
+    );
     expect(outcome.outcome).toBe('passed');
     expect(posted()).toHaveLength(4);
     // The outcome is passed and stored as such; what GitHub carries is still the
