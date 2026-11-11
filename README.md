@@ -179,10 +179,18 @@ account, model and effort:
    repository's AGENTS/skills in this normal turn, using real subagents on the
    same runtime, head/base and isolated database; it combines their results with
    native discovery without repeating it (no reviewers are spawned when none are
-   required). Then one summary comment on the PR (`# Code Review`, a summary, the
-   counts, and a collapsible section per severity, dismissed findings left out),
-   then each finding as an inline comment on its line. Each finding is registered
+   required). Before the step starts, the server reads the PR's complete review
+   thread history, and the agent reconciles each finding with it: a claim an
+   earlier thread already dismissed or addressed is not posted again, a claim
+   that already has an open thread continues there, and a decided claim comes
+   back only as a revisit that says what changed (see
+   [Earlier review decisions](docs/features.md#earlier-review-decisions)). Then
+   one summary comment on the PR (`# Code Review`, a summary, the counts, and a
+   collapsible section per severity, dismissed findings left out), then each
+   remaining finding as an inline comment on its line. Each finding is registered
    with `review_finding_add` and the summary comment with `review_summary_set`.
+   If the history cannot be read completely, the review stops here and publishes
+   nothing.
 3. **Verify**: each finding is checked against the code, trying to refute it, and
    classified Fix, Optional or Dismissed with evidence. The verdict goes into
    `review_finding_update`, and the agent replies on the finding’s own review

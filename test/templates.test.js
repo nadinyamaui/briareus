@@ -108,6 +108,18 @@ describe('renderTemplate', () => {
   });
 });
 
+describe('implement feedback action', () => {
+  it('keeps the code review’s verdict words out of its own replies', () => {
+    // The action posts from the account the review does, and a reply opening with a
+    // verdict word reads like the review's ruling to anyone looking at the thread.
+    const prompt = templateText('implementFeedback');
+    expect(prompt).toContain(
+      'never open a reply with a bold verdict word (**Fix**, **Optional** or **Dismissed**)',
+    );
+    expect(prompt).toContain('yours is an answer to one, not a ruling of its own');
+  });
+});
+
 describe('code review label policy', () => {
   it('requires feedback only for verified required Fix findings', () => {
     const labels = templateText('reviewLabels');
