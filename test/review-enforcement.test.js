@@ -1646,19 +1646,16 @@ describe('the security result beside the outcome', () => {
       expect(refreshCodeReviewOutcome).toHaveBeenCalledTimes(2);
     });
 
-    it('recomputes a quiet pull request’s outcome when the project’s settings change, without waiting to see it', async () => {
+    it('marks every stored outcome without a board lookup, including PRs a stale board omits', async () => {
       const sweep = (project) =>
         enforcement.retryReviewStatuses({ getProject: () => project, cfg, retryDelayMs: 0 });
-      // Reviewed and passed while the project asked for no pass; then nothing happens to
-      // the pull request: no push, no webhook, no session.
       reviewed();
       await refresh(on);
       expect(carried.get(head)[0].state).toBe('success');
       expect(await sweep(on)).toEqual([]);
-      // The project is switched to `required`. Its open pull requests' outcomes are
-      // marked as owed, and the sweep computes and publishes them again.
-      expect(await enforcement.oweProjectOutcomes(enforcing, { openPulls: async () => [7, 9] })).toBe(1);
-      expect(markRepoCodeReviewOutcomesStale).toHaveBeenLastCalledWith(repo, [7, 9]);
+      // No PR list can omit #7 or block a project save on GitHub.
+      expect(await enforcement.oweProjectOutcomes(enforcing)).toBe(1);
+      expect(markRepoCodeReviewOutcomesStale).toHaveBeenLastCalledWith(repo);
       expect(store.row.recomputeAt).toBeTruthy();
       expect(await sweep(enforcing)).toEqual([{ repo, prNumber: 7, published: true }]);
       expect(carried.get(head)[0]).toMatchObject({ state: 'error' });
@@ -1667,27 +1664,35 @@ describe('the security result beside the outcome', () => {
         securityPolicy: 'required',
         recomputeAt: null,
       });
-      expect(store.row.security).toMatchObject({ result: 'not_run', blocking: true });
-      // Paid once.
       expect(await sweep(enforcing)).toEqual([]);
-      // A pull request that is no longer open is left as it is: its commit needs no new status.
-      const before = posted().length;
-      expect(await enforcement.oweProjectOutcomes(on, { openPulls: async () => [9] })).toBe(0);
-      expect(await sweep(on)).toEqual([]);
-      expect(posted()).toHaveLength(before);
-      // When the open ones cannot be listed, every outcome of the repository is marked:
-      // a status too many is the lesser harm.
-      const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
-      try {
-        const failing = { openPulls: async () => Promise.reject(new Error('GitHub is down')) };
-        expect(await enforcement.oweProjectOutcomes(on, failing)).toBe(1);
-        expect(markRepoCodeReviewOutcomesStale).toHaveBeenLastCalledWith(repo, null);
-      } finally {
-        logged.mockRestore();
-      }
-      // Back to no pass asked for: the same sweep takes the requirement away again.
+      expect(await enforcement.oweProjectOutcomes(on)).toBe(1);
       expect(await sweep(on)).toEqual([{ repo, prNumber: 7, published: true }]);
       expect(carried.get(head)[0]).toMatchObject({ state: 'success' });
+    });
+
+    it.each([
+      ['reviewRoundLimit', 1],
+      ['enforceReviewOutcome', true],
+    ])('refreshes a marked outcome on the same revision after %s changes', async (key, value) => {
+      reviewed();
+      store.count = { rounds: 1 };
+      if (key === 'reviewRoundLimit') store.stages.find((s) => s.stage === 'verify').status = 'failed';
+      await refresh(off);
+      const changed = { ...off, [key]: value };
+      await enforcement.oweProjectOutcomes(changed);
+      expect(store.row.recomputeAt).toBeTruthy();
+      const seen = await note(changed);
+      expect(seen).not.toBeNull();
+      expect(store.row.recomputeAt).toBeNull();
+      if (key === 'enforceReviewOutcome') {
+        expect(seen.outcome.enforced).toBe(true);
+        expect(seen.published).toEqual({ published: true });
+      } else {
+        expect(seen.outcome.reasons).toContainEqual(
+          expect.objectContaining({ code: 'round_limit_reached', limit: 1 }),
+        );
+      }
+      expect(await note(changed)).toBeNull();
     });
 
     it('stops an incomplete pass from blocking when the project no longer requires it', async () => {

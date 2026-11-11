@@ -4048,6 +4048,57 @@ describe('native Codex code review', () => {
       await vi.waitFor(() => expect(job.status).toBe('idle'));
     });
 
+    it('rewrites the accepted record without overwriting its hard-link target', async () => {
+      stored();
+      const pass = await discover();
+      const target = path.join(root, 'server-record.json');
+      const original = JSON.stringify(record({ findings: [found('Path is not checked')] }));
+      fs.writeFileSync(target, original);
+      fs.linkSync(target, recordPath());
+      finishTurn(pass);
+      await turn(2);
+      expect(fs.readFileSync(target, 'utf8')).toBe(original);
+      expect(JSON.parse(fs.readFileSync(recordPath(), 'utf8')).findings[0].id).toBe(1);
+      expect(fs.statSync(recordPath()).nlink).toBe(1);
+      await finishRest(2);
+    });
+
+    it('withholds approval for an unresolved security fix from an earlier round with no current findings', async () => {
+      stored();
+      const claim = {
+        findingRef: 'earlier-security-fix',
+        threadId: 'PRRT_earlier',
+        title: 'Token logged',
+        verdict: 'fix',
+        security: true,
+        resolved: false,
+        decidedAt: '2026-11-01T00:05:00.000Z',
+      };
+      state.outcome.decisions = [claim];
+      listCodeReviewDecisions.mockResolvedValue([claim]);
+      const pass = await discover();
+      writeRecord({
+        claims: [
+          {
+            findingRef: claim.findingRef,
+            status: 'fixed',
+            evidence: 'Logging is redacted at lib/log.js:12.',
+          },
+        ],
+      });
+      finishTurn(pass);
+      finishTurn(await turn(2));
+      finishTurn(await turn(3));
+      const label = await turn(4);
+      expect(state.outcome.findings).toEqual([]);
+      expect(label.child.prompt).toContain(`${OWED()}: it failed on a required fix.`);
+      expect(label.child.prompt).toContain('leave the labels unchanged, submit no approval');
+      finishTurn(label);
+      await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
+      expect(security()).toMatchObject({ result: 'failed', blocking: true });
+      expect(security().reasons.map((r) => r.code)).toEqual(['fix_owed']);
+    });
+
     it('passes a required project’s review on a pass that looked and found nothing', async () => {
       stored();
       recordTurnUsage.mockClear();
@@ -4774,8 +4825,13 @@ describe('native Codex code review', () => {
         sendDevMessage(id, '/review');
         await vi.waitFor(() => expect(invocations).toHaveLength(1));
         fs.writeFileSync(summaryPath, 'A candidate finding');
+        const claimsTarget = path.join(root, 'server-claims.txt');
+        fs.writeFileSync(claimsTarget, 'keep server data');
+        fs.linkSync(claimsTarget, claimsPath());
         finishReview(invocations[0]);
         const pass = await turn(1);
+        expect(fs.readFileSync(claimsTarget, 'utf8')).toBe('keep server data');
+        expect(fs.statSync(claimsPath()).nlink).toBe(1);
         const prompt = pass.child.prompt;
         // The same range the provider's own review was told.
         expect(prompt).toContain('This is code review round 2 of 3 of this pull request.');

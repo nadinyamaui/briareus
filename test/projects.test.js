@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { oweProjectOutcomes } from '../lib/review-enforcement.js';
 
 // normalizeProject is not exported, so validation is tested through createProject and
 // updateProject, with the DB layer mocked to hand back whatever it was asked to save.
@@ -7,6 +8,7 @@ const state = vi.hoisted(() => ({
   saved: [],
   deleted: [],
   ordered: [],
+  outcomesMarked: [],
   nextId: 1,
   loadError: null,
   // Runs inside a save, standing in for another request that lands meanwhile.
@@ -14,6 +16,10 @@ const state = vi.hoisted(() => ({
 }));
 
 vi.mock('../lib/db.js', () => ({
+  markRepoCodeReviewOutcomesStale: async (repo) => {
+    state.outcomesMarked.push(repo);
+    return 1;
+  },
   loadProjectRows: async () => {
     if (state.loadError) throw state.loadError;
     return state.rows;
@@ -72,6 +78,7 @@ async function seed(rows = []) {
   state.saved = [];
   state.deleted = [];
   state.ordered = [];
+  state.outcomesMarked = [];
   state.loadError = null;
   state.during = null;
   state.nextId = Math.max(0, ...rows.map((r) => r.id || 0)) + 1;
@@ -986,6 +993,23 @@ describe('settings the review outcome is computed from', () => {
     await updateProject(saved.id, { securityReview: 'off' });
     expect(changes.at(-1)).toBe('off');
     expect(OUTCOME_SETTINGS).toEqual(['securityReview', 'enforceReviewOutcome', 'reviewRoundLimit']);
+  });
+
+  it('marks stored outcomes without a cold GitHub board fetch delaying subsequent edits', async () => {
+    const first = await createProject({ ...base });
+    const second = await createProject({ ...base, repo: 'acme/other' });
+    onOutcomeSettingsChange(oweProjectOutcomes);
+    const fetch = vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise(() => {}));
+    try {
+      const changed = updateProject(first.id, { securityReview: 'required' });
+      const renamed = updateProject(second.id, { label: 'Saved without waiting for GitHub' });
+      await expect(changed).resolves.toMatchObject({ securityReview: 'required' });
+      await expect(renamed).resolves.toMatchObject({ label: 'Saved without waiting for GitHub' });
+      expect(state.outcomesMarked).toEqual([base.repo]);
+      expect(fetch).not.toHaveBeenCalled();
+    } finally {
+      fetch.mockRestore();
+    }
   });
 
   it('keep a save that landed even when the outcomes could not be marked', async () => {

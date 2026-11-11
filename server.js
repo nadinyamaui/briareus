@@ -569,15 +569,9 @@ api.put('/api/projects/order', async (req, res) => {
   }
 });
 
-// A save that changes what a project's review outcomes are computed from (its security
-// policy, whether it enforces the outcome, its round limit) marks the outcomes of its open
-// pull requests as owed, and the sweep below computes and publishes them again. The
-// board is cached and mirrored, so listing them costs no GitHub call on an ordinary save.
-onOutcomeSettingsChange((project) =>
-  oweProjectOutcomes(project, {
-    openPulls: async (saved) => (await projectPulls(saved)).pulls.map((pr) => pr.number),
-  }),
-);
+// Mark every stored outcome so a cold or stale board neither delays project edits
+// nor leaves a reviewed pull request computed under the previous settings.
+onOutcomeSettingsChange((project) => oweProjectOutcomes(project));
 
 api.put('/api/projects/:id', async (req, res) => {
   try {
