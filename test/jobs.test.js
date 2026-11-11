@@ -1874,11 +1874,11 @@ describe('Claude code review in a later round', () => {
         2,
         expect.objectContaining({ round: 2, scope: 'incremental', scopeBaseSha: reviewedHead }),
       );
-      // Counted as the babysitter's, the way the session was started.
+      // The person typed this request into a session the babysitter started.
       expect(state.reviewRounds.get('acme/shop#4300').rounds[1]).toMatchObject({
         round: 2,
         headSha: head,
-        source: 'babysitter',
+        source: 'user',
         jobId: id,
       });
       invocations[0].child.emit('close', 1);
@@ -2602,6 +2602,151 @@ describe('native Codex code review', () => {
       expect(state.reviewRounds.get(key).count.rounds).toBe(2);
     });
 
+    it('keeps what the previous round registered with no verdict or thread among what is outstanding', async () => {
+      trackBase();
+      const reviewedHead = commit('cart.js', 200, 'feature');
+      const next = commit('fix.js', 12, 'fix');
+      pullAt(next);
+      reviewedRounds('acme/shop', 77, [reviewedHead], { baseRef, mergeBaseSha: head });
+      listCodeReviewDecisions.mockImplementation(async () => [
+        {
+          findingRef: 'ref-leak',
+          threadId: 'PRRT_leak',
+          verdict: 'fix',
+          decidedAt: '2026-11-01T00:05:00.000Z',
+        },
+      ]);
+      // Round 1's own review row, as the session that ran it left it.
+      getCodeReviewByJob.mockImplementation(async (jobId) =>
+        jobId === 'earlier-1' ? { id: 40, jobId, round: 1 } : null,
+      );
+      listCodeReviewFindings.mockImplementation(async (reviewId) =>
+        reviewId === 40
+          ? [
+              { findingRef: 'ref-leak', shouldFix: 'fix', title: 'Logs the token' },
+              { findingRef: 'ref-silent', shouldFix: null, title: 'Unchecked input', filePath: 'cart.js' },
+            ]
+          : [],
+      );
+      sendDevMessage(id, '/review');
+      await vi.waitFor(() => expect(invocations).toHaveLength(1));
+      expect(job.codeReviewRound).toMatchObject({ round: 2, outstanding: 2 });
+      const file = JSON.parse(fs.readFileSync(scopePath(), 'utf8'));
+      expect(file.outstanding.map((f) => [f.findingRef, f.status])).toEqual([
+        ['ref-leak', 'fix'],
+        ['ref-silent', 'unverified'],
+      ]);
+      finishReview(invocations[0], 1);
+      await vi.waitFor(() => expect(job.status).toBe('idle'));
+    });
+
+    it('keeps its own previous findings when claiming the next round changes its review row', async () => {
+      trackBase();
+      const reviewedHead = commit('cart.js', 200, 'feature');
+      pullAt(commit('fix.js', 12, 'fix'));
+      const pull = reviewedRounds('acme/shop', 77, [reviewedHead], { baseRef, mergeBaseSha: head });
+      pull.rounds[0].jobId = id;
+      const review = { id: 40, jobId: id, round: 1, headSha: reviewedHead };
+      getCodeReviewByJob.mockImplementation(async (jobId) => (jobId === id ? { ...review } : null));
+      const finding = { findingRef: 'ref-silent', shouldFix: null, title: 'Unchecked input' };
+      let findings = [finding];
+      listCodeReviewFindings.mockImplementation(async () => [...findings]);
+      claimCodeReviewRound.mockImplementationOnce(async (request, decide) => {
+        const claim = state.claimRound(request, decide);
+        review.round = claim.round.round; // The real claim writes this before returning.
+        return claim;
+      });
+      restartCodeReview.mockImplementationOnce(async () => {
+        findings = []; // The real reset deletes the previous run's findings.
+      });
+      sendDevMessage(id, '/review');
+      await vi.waitFor(() => expect(invocations).toHaveLength(1));
+      expect(review.round).toBe(2);
+      expect(findings).toEqual([]);
+      expect(job.codeReviewRound).toMatchObject({ round: 2, outstanding: 1 });
+      expect(JSON.parse(fs.readFileSync(scopePath(), 'utf8')).outstanding).toEqual([
+        expect.objectContaining({ findingRef: 'ref-silent', status: 'unverified' }),
+      ]);
+      finishReview(invocations[0], 1);
+      await vi.waitFor(() => expect(job.status).toBe('idle'));
+    });
+
+    it.each([false, true])(
+      'treats a person’s /review as theirs without changing later automation (queued: %s)',
+      async (queued) => {
+        trackBase();
+        const pull = reviewedRounds('acme/shop', 77, [head], { baseRef });
+        job.ownerId = 4;
+        job.reviewRequest = { source: 'babysitter', requestedBy: null, continuation: false };
+        if (queued) {
+          // Restore a command queued before a restart, then let the next send drain it.
+          job.recoveryQueue = [
+            { prompt: '/review', shown: '/review', files: [], unattended: false, automatic: false },
+          ];
+          job.status = 'closed';
+          state.stored = [job];
+          await initJobs();
+          job = getJob(id);
+          job.status = 'idle';
+          sendDevMessage(id, 'Continue');
+        } else sendDevMessage(id, '/review');
+        await vi.waitFor(() => expect(invocations).toHaveLength(1));
+        expect(claimCodeReviewRound.mock.calls[0][0]).toMatchObject({
+          source: 'user',
+          requestedBy: 'user:4',
+          continuation: false,
+        });
+        expect(job.recoveryTurn.opts.reviewFromUser).toBe(true);
+        expect(pull.count.rounds).toBe(1);
+        fs.writeFileSync(summaryPath, 'A candidate finding');
+        finishReview(invocations[0]);
+        await finishRest(1);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+        sendDevMessage(id, '/review', undefined, { unattended: true });
+        await vi.waitFor(() => expect(job.error).toMatch(/automated review does not run twice/));
+        expect(claimCodeReviewRound.mock.calls.at(-1)[0]).toMatchObject({ source: 'babysitter' });
+        expect(pull.count.rounds).toBe(1);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+      },
+    );
+
+    it.each([false, true])(
+      'keeps an orchestrator’s send_to_worker /review as automation (queued: %s)',
+      async (queued) => {
+        trackBase();
+        const pull = reviewedRounds('acme/shop', 77, [head], { baseRef });
+        job.ownerId = 4;
+        job.parentId = 'orch-1';
+        job.reviewRequest = { source: 'orchestrator', requestedBy: 'session:orch-1', continuation: false };
+        if (queued) {
+          job.recoveryQueue = [
+            {
+              prompt: '/review',
+              shown: '/review',
+              files: [],
+              unattended: false,
+              automatic: false,
+              fromAgent: true,
+            },
+          ];
+          job.status = 'closed';
+          state.stored = [job];
+          await initJobs();
+          job = getJob(id);
+          job.status = 'idle';
+          sendDevMessage(id, 'Continue', undefined, { fromAgent: true });
+        } else sendDevMessage(id, '/review', undefined, { fromAgent: true });
+        await vi.waitFor(() => expect(job.error).toMatch(/automated review does not run twice/));
+        expect(claimCodeReviewRound.mock.calls[0][0]).toMatchObject({
+          source: 'orchestrator',
+          requestedBy: 'session:orch-1',
+        });
+        expect(invocations).toHaveLength(0);
+        expect(pull.count.rounds).toBe(1);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+      },
+    );
+
     it('measures the change without blocking the server, and widens when git does not answer in time', async () => {
       trackBase();
       const reviewedHead = commit('cart.js', 200, 'feature');
@@ -3007,7 +3152,7 @@ describe('native Codex code review', () => {
         baseRef,
       });
       job.reviewRequest = { source: 'babysitter', requestedBy: null, continuation: false };
-      sendDevMessage(id, '/review');
+      sendDevMessage(id, '/review', undefined, { unattended: true });
       await vi.waitFor(() => expect(job.error).toBeTruthy());
       expect(job.error).toContain('acme/shop PR #77 has used 3 of its 3 code review rounds');
       expect(job.error).toContain('nothing is labelled, approved or reported as passed');
@@ -3466,53 +3611,61 @@ describe('native Codex code review', () => {
       await vi.waitFor(() => expect(job.status).toBe('idle'));
     });
 
-    it('does not run the label step when its start cannot be recorded, so the findings stay closed', async () => {
-      state.projects[0].enforceReviewOutcome = true;
-      stored();
-      github();
-      // The stage record is what closes the findings to the review from this step on
-      // (reviewFindingsFrozen). Its write fails: a database hiccup at the wrong moment.
-      const record = setCodeReviewStage.getMockImplementation();
-      setCodeReviewStage.mockImplementation(async (jobId, name, headSha, seen) => {
-        if (name === 'label' && seen.status === 'running') throw new Error('Lock wait timeout exceeded');
-        return record(jobId, name, headSha, seen);
-      });
-      const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
-      try {
-        await discover();
-        finishTurn(await turn(1));
-        finishTurn(await turn(2));
-        await vi.waitFor(() => expect(failCodeReview).toHaveBeenCalledWith(id));
-        // The step was never handed to the agent: it could not have been told the
-        // outcome while still able to write itself the evidence that outcome misses.
-        expect(invocations).toHaveLength(3);
-        expect(job.error).toContain('The label step could not be recorded as started, so it was not run');
-        expect(job.codeReviewRecord.labelAt).toBeUndefined();
-        await vi.waitFor(() => expect(state.outcome.row.outcome).toBe('incomplete'));
-        expect(state.outcome.row.reasons.map((r) => [r.code, r.stage])).toEqual([['stage_not_run', 'label']]);
-        await vi.waitFor(() =>
-          expect(statuses()).toEqual([
-            [head, 'pending'],
-            [head, 'error'],
-          ]),
-        );
-        await vi.waitFor(() => expect(job.status).toBe('idle'));
-        // A project that does not enforce the outcome freezes nothing, and its review
-        // goes on as it always did when a record could not be written.
-        state.projects[0].enforceReviewOutcome = false;
-        failCodeReview.mockClear();
-        sendDevMessage(id, '/review');
-        await vi.waitFor(() => expect(invocations).toHaveLength(4));
-        fs.writeFileSync(summaryPath, 'A candidate finding');
-        finishReview(invocations[3]);
-        for (let i = 4; i <= 6; i++) finishTurn(await turn(i));
-        await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
-        expect(failCodeReview).not.toHaveBeenCalled();
-      } finally {
-        setCodeReviewStage.mockImplementation(record);
-        logged.mockRestore();
-      }
-    });
+    it.each(['throws', 'matches no row'])(
+      'does not run the label step when its start %s, so the findings stay closed',
+      async (failure) => {
+        state.projects[0].enforceReviewOutcome = true;
+        stored();
+        github();
+        // The stage record is what closes the findings to the review from this step on
+        // (reviewFindingsFrozen). Its write fails: a database hiccup at the wrong moment.
+        const record = setCodeReviewStage.getMockImplementation();
+        setCodeReviewStage.mockImplementation(async (jobId, name, headSha, seen) => {
+          if (name === 'label' && seen.status === 'running') {
+            if (failure === 'matches no row') return false;
+            throw new Error('Lock wait timeout exceeded');
+          }
+          return record(jobId, name, headSha, seen);
+        });
+        const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+        try {
+          await discover();
+          finishTurn(await turn(1));
+          finishTurn(await turn(2));
+          await vi.waitFor(() => expect(failCodeReview).toHaveBeenCalledWith(id));
+          // The step was never handed to the agent: it could not have been told the
+          // outcome while still able to write itself the evidence that outcome misses.
+          expect(invocations).toHaveLength(3);
+          expect(job.error).toContain('The label step could not be recorded as started, so it was not run');
+          expect(job.codeReviewRecord.labelAt).toBeUndefined();
+          await vi.waitFor(() => expect(state.outcome.row.outcome).toBe('incomplete'));
+          expect(state.outcome.row.reasons.map((r) => [r.code, r.stage])).toEqual([
+            ['stage_not_run', 'label'],
+          ]);
+          await vi.waitFor(() =>
+            expect(statuses()).toEqual([
+              [head, 'pending'],
+              [head, 'error'],
+            ]),
+          );
+          await vi.waitFor(() => expect(job.status).toBe('idle'));
+          // A project that does not enforce the outcome freezes nothing, and its review
+          // goes on as it always did when a record could not be written.
+          state.projects[0].enforceReviewOutcome = false;
+          failCodeReview.mockClear();
+          sendDevMessage(id, '/review');
+          await vi.waitFor(() => expect(invocations).toHaveLength(4));
+          fs.writeFileSync(summaryPath, 'A candidate finding');
+          finishReview(invocations[3]);
+          for (let i = 4; i <= 6; i++) finishTurn(await turn(i));
+          await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
+          expect(failCodeReview).not.toHaveBeenCalled();
+        } finally {
+          setCodeReviewStage.mockImplementation(record);
+          logged.mockRestore();
+        }
+      },
+    );
 
     it('takes the pass away when the reviewed pull request is retargeted or pushed to', async () => {
       state.projects[0].enforceReviewOutcome = true;
@@ -20704,9 +20857,29 @@ describe('official orchestrator PR actions', () => {
           }),
         );
         expect(error.message).not.toContain('private');
+        // The blocker is in the orchestrator's own project, where it may close it.
+        expect(error.message).toContain('Close it with close_session');
       } else expect(error.message).toBe(generic);
       expect(workerSessionsFor(parent)).toHaveLength(before - (parentId === parent.id ? 0 : 1));
       expect(createCodeReview.mock.calls).toHaveLength(reviewsBefore);
+    } finally {
+      for (const key of Object.keys(blocker)) delete blocker[key];
+      Object.assign(blocker, original);
+    }
+  });
+
+  it('does not point close_session at an unattended blocker, whose close would delete it', async () => {
+    parent.ownerId = 42;
+    const blocker = getJob('pr-cap-0');
+    const original = { ...blocker };
+    Object.assign(blocker, { ownerId: 42, status: 'idle', startedOnPr: 12, autoClose: true });
+    try {
+      const error = await startOrchestratorPrAction(parent, { action: 'review', prNumber: 12 }).catch(
+        (e) => e,
+      );
+      expect(error.message).toContain('Blocking session');
+      expect(error.message).not.toContain('close_session');
+      expect(error.message).toContain('Ask the user to finish or close this session');
     } finally {
       for (const key of Object.keys(blocker)) delete blocker[key];
       Object.assign(blocker, original);
