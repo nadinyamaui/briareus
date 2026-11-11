@@ -776,6 +776,10 @@ api.use(
         session: getJob(review.jobId),
         listStages: listCodeReviewStages,
       }),
+    refresh: async (review) => {
+      const project = getProject(review.repo);
+      if (project) await refreshReviewOutcome(project, review.prNumber, { cfg: getConfig() });
+    },
   }),
 );
 api.use(
