@@ -42,6 +42,13 @@ import {
   reviewLimitsWaiting,
   reviewRefusalBody,
 } from './lib/review-rounds.js';
+import {
+  readReviewOutcome,
+  refreshReviewOutcome,
+  retryReviewStatuses,
+  reviewFindingsFrozen,
+  reviewStatusFailures,
+} from './lib/review-enforcement.js';
 import { createSshResourceMonitor } from './lib/ssh-resource-monitor.js';
 import { sshTelemetryRoutes } from './lib/ssh-telemetry-routes.js';
 import { createSlackService } from './lib/slack.js';
@@ -96,6 +103,9 @@ import {
   updateCodeReviewFinding,
   setCodeReviewSummary,
   listCodeReviewDecisions,
+  getCodeReviewDecision,
+  saveCodeReviewDecisions,
+  listCodeReviewStages,
 } from './lib/db.js';
 import {
   initJobs,
@@ -756,6 +766,20 @@ api.use(
       updateCodeReviewFinding,
       setCodeReviewSummary,
     },
+    // From its label step on, the review of a project that enforces the outcome no
+    // longer changes its own findings: the outcome is computed from what was recorded
+    // by then, and the step that is told it cannot write itself a better one.
+    frozen: (review) =>
+      reviewFindingsFrozen({
+        project: getProject(review.repo),
+        review,
+        session: getJob(review.jobId),
+        listStages: listCodeReviewStages,
+      }),
+    refresh: async (review) => {
+      const project = getProject(review.repo);
+      if (project) await refreshReviewOutcome(project, review.prNumber, { cfg: getConfig() });
+    },
   }),
 );
 api.use(
@@ -769,9 +793,19 @@ api.use(
       getCodeReviewFinding,
       updateCodeReviewFinding,
       listCodeReviewDecisions,
+      getCodeReviewDecision,
+      saveCodeReviewDecisions,
+      listCodeReviewStages,
     },
     rounds: (project, prNumber, options) =>
       readReviewRounds(project, prNumber, { ...options, cfg: getConfig() }),
+    outcome: {
+      read: readReviewOutcome,
+      // The verdict a client just changed: stored, and its commit status brought in
+      // line without the request waiting on GitHub.
+      refresh: async (project, prNumber) =>
+        (await refreshReviewOutcome(project, prNumber, { cfg: getConfig() })).outcome,
+    },
   }),
 );
 api.use(
@@ -894,6 +928,12 @@ api.use(
       reviewLimitsWaiting({
         getProject,
         repos,
+        isOpen: async (project, prNumber) =>
+          (await projectPulls(project)).pulls.some((pr) => pr.number === prNumber),
+      }),
+    reviewStatuses: () =>
+      reviewStatusFailures({
+        getProject,
         isOpen: async (project, prNumber) =>
           (await projectPulls(project)).pulls.some((pr) => pr.number === prNumber),
       }),
@@ -2394,6 +2434,18 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
     sessionStats.start();
     // Projects with `babysitPrs` get their pull requests' errands started every 15 minutes.
     createBabysitter().startTimer();
+    // What a code review outcome still owes GitHub is paid here: a status GitHub did
+    // not take, once its backoff is due, and one never sent or an outcome never computed
+    // again because the server stopped first, which is why this also runs now, at boot.
+    const sweepReviewStatuses = () =>
+      retryReviewStatuses({
+        getProject,
+        cfg: getConfig(),
+        isOpen: async (project, prNumber) =>
+          (await projectPulls(project)).pulls.some((pr) => pr.number === prNumber),
+      }).catch((e) => console.error('Could not sweep code review statuses:', e.message));
+    sweepReviewStatuses();
+    setInterval(sweepReviewStatuses, 60_000).unref();
     databaseBackups.start();
     sshResourceMonitor.start();
     githubSync.start();

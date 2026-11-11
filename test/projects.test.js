@@ -381,6 +381,29 @@ describe('the code review round limit', () => {
   });
 });
 
+describe('enforcing the code review outcome', () => {
+  it('is off until it is switched on, and stays as set', async () => {
+    const saved = await createProject({ ...base });
+    expect(saved.enforceReviewOutcome).toBe(false);
+    expect((await updateProject(saved.id, { enforceReviewOutcome: true })).enforceReviewOutcome).toBe(true);
+    // An update that names nothing about it leaves it alone.
+    expect((await updateProject(saved.id, { label: 'Renamed' })).enforceReviewOutcome).toBe(true);
+    expect((await updateProject(saved.id, { enforceReviewOutcome: false })).enforceReviewOutcome).toBe(false);
+    expect(await createProject({ ...base, repo: 'acme/enforced', enforceReviewOutcome: true })).toMatchObject(
+      { enforceReviewOutcome: true },
+    );
+  });
+
+  it('takes only true or false: it makes GitHub block merges, so nothing loose switches it', async () => {
+    const saved = await createProject({ ...base });
+    for (const bad of ['true', 'false', 1, 0, null, ''])
+      await expect(updateProject(saved.id, { enforceReviewOutcome: bad })).rejects.toThrow(
+        'enforceReviewOutcome must be true or false',
+      );
+    expect((await updateProject(saved.id, { label: 'Still off' })).enforceReviewOutcome).toBe(false);
+  });
+});
+
 describe('the local checkout auto-update', () => {
   it('keeps the update commands one per line and needs a checkout to be on', async () => {
     const saved = await createProject({

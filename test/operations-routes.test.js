@@ -191,6 +191,48 @@ it.each(['admin', 'member'])('keeps cross-project supervisor context for a %s', 
   }
 });
 
+it('lists review outcomes GitHub does not carry to whoever may see the project, and survives an unreadable store', async () => {
+  const failing = (repo, prNumber) => ({
+    repo,
+    prNumber,
+    headSha: 'b'.repeat(40),
+    outcome: 'passed',
+    state: 'success',
+    publishedSha: null,
+    publishedState: null,
+    error: 'GitHub answered 403',
+    failedAt: '2026-11-10T12:00:00.000Z',
+  });
+  const reviewStatuses = vi.fn(async () => [failing('acme/shop', 7), failing('acme/site', 9)]);
+  const quiet = { listSessions: () => [], reviewStatuses };
+  const ids = async (call) =>
+    (await (await call('/api/operations/attention')).json()).items.map((item) => item.id);
+  const admin = await serve(quiet);
+  const member = await serve(quiet, { id: 2, role: 'member' }, ['acme/shop']);
+  try {
+    expect(await ids(admin.call)).toEqual(['review-status:acme/shop#7', 'review-status:acme/site#9']);
+    expect(await ids(member.call)).toEqual(['review-status:acme/shop#7']);
+    const [item] = (await (await member.call('/api/operations/attention')).json()).items;
+    expect(item).toMatchObject({ kind: 'review-status', repo: 'acme/shop', prNumber: 7, sessionId: null });
+  } finally {
+    await admin.close();
+    await member.close();
+  }
+  const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const down = await serve({
+    reviewStatuses: async () => {
+      throw new Error('Database unavailable');
+    },
+  });
+  try {
+    expect(await ids(down.call)).toEqual(['s:recovery']);
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('Database unavailable'));
+  } finally {
+    await down.close();
+    logged.mockRestore();
+  }
+});
+
 it('lists reviews stopped at their round limit to whoever may see the project, and survives an unreadable store', async () => {
   const waiting = (repo, prNumber) => ({
     repo,

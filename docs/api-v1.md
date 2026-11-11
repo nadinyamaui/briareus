@@ -368,6 +368,20 @@ rounds, the allowance and what is still unresolved, and a pull request waiting a
 limit is listed in `GET /attention` as a `review-limit` item. See
 [Review rounds](features.md#review-rounds).
 
+Whether a review session finished (`CodeReview.status`) is not what the review
+amounts to. `GET /pulls/{number}/code-reviews` and
+`GET /pulls/{number}/code-review-rounds` carry `reviewOutcome`: `pending`,
+`incomplete`, `changes_required` or `passed`, with machine-readable `reasons`, the
+reviewed head and base, `stale`, the stage records and the state of its commit
+status. The server computes it from what it recorded, never from labels or an
+approval. With the project’s `enforceReviewOutcome` on, it is published as the commit
+status `briareus/code-review`, which a repository can require; `status.published`
+says whether GitHub carries it. A verdict counts as verified only with the evidence
+recorded for it, also on the decision that outlives its finding; a claim left
+unverified with no finding to change is settled with
+`PATCH /pulls/{number}/code-review-decisions/{decisionId}`. See
+[Review outcome](features.md#review-outcome).
+
 ## Pull request data
 
 To bring a PR branch up to date with its base, call

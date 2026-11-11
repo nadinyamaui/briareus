@@ -96,8 +96,11 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review rounds on My
   });
 
   it('adds the tables, the review columns and the project limit at boot, and applies twice', async () => {
-    const [ran] = await pool.query('SELECT `migration` FROM `migrations` ORDER BY `id` DESC LIMIT 1');
-    expect(ran[0].migration).toBe('2026_11_10_130000_add_code_review_rounds');
+    // By name, not as the latest: later migrations follow it.
+    const [ran] = await pool.query('SELECT `migration` FROM `migrations` WHERE `migration` = ?', [
+      '2026_11_10_130000_add_code_review_rounds',
+    ]);
+    expect(ran).toHaveLength(1);
     expect(await tables()).toEqual(['code_review_round_counts', 'code_review_rounds']);
     const reviews = await columns('code_reviews');
     expect(reviews.slice(reviews.indexOf('head_sha') + 1, reviews.indexOf('user_id'))).toEqual(

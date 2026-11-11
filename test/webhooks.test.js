@@ -14,6 +14,7 @@ vi.mock('../lib/jobs.js', () => ({
   getJob: vi.fn(() => null),
   deliverToSession: vi.fn(() => ({ status: 'running', held: 0 })),
   instructSession: vi.fn(() => ({ status: 'running' })),
+  noteReviewedPull: vi.fn(async () => null),
 }));
 
 const feedback = vi.hoisted(() => ({ reviewEvent: vi.fn(async () => {}) }));
@@ -40,6 +41,7 @@ import {
   getJob,
   deliverToSession,
   instructSession,
+  noteReviewedPull,
 } from '../lib/jobs.js';
 import { deliveryId, DELIVERY_MAX_CHARS } from '../lib/deliveries.js';
 
@@ -141,6 +143,39 @@ describe('POST /webhooks/github', () => {
     expect(res.status).toBe(202);
     await settle();
     expect(syncSessionsOn).toHaveBeenCalledWith('acme/shop', 'feature/x');
+  });
+
+  it('says at which head and base branch a pull_request event shows the pull request', async () => {
+    noteReviewedPull.mockClear();
+    const pull = { number: 7, state: 'open', head: { ref: 'feature/x', sha: 'a'.repeat(40) } };
+    // A push moves the head; a retarget moves only the base, under the same head, and
+    // no session need be on the pull request for either to count.
+    await githubDelivery('pull_request', {
+      repository: { full_name: 'acme/shop' },
+      action: 'synchronize',
+      pull_request: { ...pull, base: { ref: 'main' } },
+    });
+    await githubDelivery('pull_request', {
+      repository: { full_name: 'acme/shop' },
+      action: 'edited',
+      changes: { base: { ref: { from: 'main' } } },
+      pull_request: { ...pull, base: { ref: 'release' } },
+    });
+    await githubDelivery('pull_request', {
+      repository: { full_name: 'acme/shop' },
+      action: 'closed',
+      pull_request: { ...pull, state: 'closed', base: { ref: 'release' } },
+    });
+    await settle();
+    expect(noteReviewedPull.mock.calls).toEqual([
+      ['acme/shop', { number: 7, headSha: 'a'.repeat(40), baseRef: 'main', state: 'open' }],
+      ['acme/shop', { number: 7, headSha: 'a'.repeat(40), baseRef: 'release', state: 'open' }],
+      ['acme/shop', { number: 7, headSha: 'a'.repeat(40), baseRef: 'release', state: 'closed' }],
+    ]);
+    // Another kind of event carries no revision to speak of.
+    await githubDelivery('issue_comment', { repository: { full_name: 'acme/shop' }, issue: { number: 7 } });
+    await settle();
+    expect(noteReviewedPull).toHaveBeenCalledTimes(3);
   });
 
   it('updates the local checkout when a pull request merges, and only then', async () => {

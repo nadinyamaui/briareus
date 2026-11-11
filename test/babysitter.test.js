@@ -6,6 +6,8 @@ vi.mock('../lib/jobs.js', () => ({
   pullRequestHasOpenSession: vi.fn(() => false),
   // What a review is created with once it is admitted (lib/review-rounds.js).
   admitPullReview: vi.fn(async ({ source }) => ({ source, requestedBy: null, continuation: false })),
+  // The revision each listed pull request was seen at (lib/review-enforcement.js).
+  noteReviewedPull: vi.fn(async () => null),
 }));
 // The spec itself is lib/actions.js's business, tested there; here it only has to
 // reach createDevSession with the runtime on top.
@@ -21,7 +23,7 @@ import {
   MAX_PUSH_ERRANDS,
   MAX_REVIEWS_PER_TICK,
 } from '../lib/babysitter.js';
-import { admitPullReview, createDevSession } from '../lib/jobs.js';
+import { admitPullReview, createDevSession, noteReviewedPull } from '../lib/jobs.js';
 import { actionSessionSpec } from '../lib/actions.js';
 
 const project = (over = {}) => ({
@@ -117,6 +119,22 @@ describe('PR errands', () => {
     expect(
       errandsFor(pr({ checks: 'failure', author: 'MORGAN', labels }), project({ prAuthor: 'morgan' })),
     ).toEqual(['fix-checks']);
+  });
+  it('says at which head and base branch it saw every listed pull request, errand or none', async () => {
+    noteReviewedPull.mockClear();
+    // One that needs nothing, and one retargeted since it was reviewed: the board is
+    // where the server sees that when no hook and no session tells it.
+    const { b } = sitter({
+      pulls: [
+        pr({ number: 7, labels: labelled('code-approved') }),
+        pr({ number: 8, baseBranch: 'release', headSha: 'fed9876cba', draft: true }),
+      ],
+    });
+    await b.tick();
+    expect(noteReviewedPull.mock.calls).toEqual([
+      ['acme/shop', { number: 7, headSha: 'abc1234def', baseRef: 'main' }],
+      ['acme/shop', { number: 8, headSha: 'fed9876cba', baseRef: 'release' }],
+    ]);
   });
   it('reviews a head once, without counting it as a push', async () => {
     const stored = {};
