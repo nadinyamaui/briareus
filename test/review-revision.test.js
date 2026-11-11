@@ -368,6 +368,7 @@ beforeEach(async () => {
     ],
     // The open pull requests at a commit; this one alone unless a test says otherwise.
     pullsAt: null,
+    openPulls: [],
     reviews: [],
     permissions: {},
     user: { login: 'briareus-bot' },
@@ -394,6 +395,11 @@ beforeEach(async () => {
             200,
             github.pullsAt ? github.pullsAt(at) : [{ number: 7, state: 'open', head: { sha: at } }],
           );
+        }
+        if (path.includes('/pulls?state=open')) {
+          if (github.failing.openPulls) return answer(github.failing.openPulls);
+          const page = Number(/[?&]page=(\d+)/.exec(path)?.[1] || 1);
+          return answer(200, github.openPulls.slice((page - 1) * 100, page * 100));
         }
         const member = /\/collaborators\/([^/]+)\/permission/.exec(path)?.[1];
         if (member) return answer(200, github.permissions[member] || { permission: 'read' });
@@ -1333,6 +1339,45 @@ describe('a commit shared by several pull requests', () => {
     });
   });
 
+  it.each([false, true])('protects a default-branch head when its sibling is stored (%s)', async (known) => {
+    trivial();
+    if (known) {
+      fivePending();
+      store.siblings.review[0].state = 'pending';
+    }
+    const sibling = known ? 5 : 9;
+    // On the default branch GitHub's commit endpoint lists only the merged PR.
+    github.pullsAt = () => [{ number: 1, state: 'closed', merged_at: '2026-11-01', head: { sha: head } }];
+    github.openPulls = [7, sibling].map((number) => ({ number, state: 'open', head: { sha: head } }));
+    await refresh(enforcing(), { current });
+    expect(posted()).toHaveLength(2);
+    expect(posted().map((s) => s.state)).toEqual(['pending', 'pending']);
+    expect(posted().every((s) => s.description.startsWith(`PR #${sibling}:`))).toBe(true);
+    expect(asked('/pulls?state=open')).toHaveLength(2);
+  });
+
+  it('paginates the default-branch fallback and excludes closed or different heads', async () => {
+    github.pullsAt = () => [];
+    github.openPulls = [
+      ...Array.from({ length: 100 }, (_, i) => ({ number: i + 100, state: 'open', head: { sha: next } })),
+      { number: 7, state: 'open', head: { sha: head } },
+      { number: 9, state: 'open', head: { sha: head } },
+      { number: 5, state: 'closed', head: { sha: head } },
+    ];
+    expect(await revision.pullsAtHead(cfg, repo, head, { prNumber: 7 })).toEqual([7, 9]);
+    expect(asked('/pulls?state=open')).toHaveLength(2);
+  });
+
+  it('withholds success when the default-branch fallback cannot be read', async () => {
+    trivial();
+    github.pullsAt = () => [];
+    github.failing.openPulls = 503;
+    await refresh(enforcing(), { current });
+    expect(posted()).toEqual([]);
+    expect(store.row.publishError).toContain('success');
+    expect(store.readiness.publishError).toContain('success');
+  });
+
   it('leaves out pull requests that closed or merely contain the commit', async () => {
     trivial();
     // A row is still stored for pull request 5, which closed since.
@@ -1565,6 +1610,34 @@ describe('approvals given on GitHub', () => {
     expect(await sweep(disabled, due + 120000)).toEqual([]);
   });
 
+  it.each(['short file list', 'failed files read'])(
+    'counts synced approvals at high risk despite a %s',
+    async (failure) => {
+      reviewed();
+      github.reviews = [review(1, 'octo-reviewer'), review(2, 'mona-reviewer')];
+      github.files = changed('README.md');
+      if (failure === 'short file list') github.pull.changed_files = 5;
+      else github.failing.files = 502;
+      const project = withPolicy({ acceptGithubApprovals: true });
+      const given = await refresh(project, { current: { headSha: head, baseRef: 'main' } });
+      expect(store.risk.error).toBeTruthy();
+      expect(store.risk.reviewsSyncedAt).toBeTruthy();
+      expect(given.approvals).toMatchObject({ tier: 'high', required: 2, valid: 2, result: 'satisfied' });
+      // The files failure remains pending before its retry, independently of fresh reviews.
+      expect((await refresh(project)).approvals).toMatchObject({ valid: 2, result: 'satisfied' });
+    },
+  );
+
+  it('reads GitHub reviews once when current names only the head', async () => {
+    reviewed();
+    github.reviews = [review(1, 'octo-reviewer')];
+    const project = withPolicy({ acceptGithubApprovals: true });
+    await refresh(project, { current: { headSha: head } });
+    expect(asked('/reviews?')).toHaveLength(1);
+    await refresh(project, { current: { headSha: head } });
+    expect(asked('/reviews?')).toHaveLength(2);
+  });
+
   it('never counts the approval a review’s own label step submitted, even once the account is no longer linked', async () => {
     reviewed();
     github.reviews = [review(1, 'grace-dev'), review(2, 'grace-dev', 'APPROVED', { id: 2 })];
@@ -1650,8 +1723,8 @@ describe('approvals given on GitHub', () => {
     expect(asked('/pulls/7/files')).toHaveLength(1);
     expect(asked('/reviews').length).toBeGreaterThan(0);
     expect(store.risk).toMatchObject({ complete: false, retryAt, error, attempts: 1 });
-    // No approval given there counts while the revision itself could not be read.
-    expect(store.readiness.valid).toBe(0);
+    // Unknown files raise risk; successfully synced reviews still count.
+    expect(store.readiness.valid).toBe(1);
     await sweep(project, Date.parse(retryAt) + 1);
     expect(store.risk).toMatchObject({ complete: true, error: null, retryAt: null });
     expect(store.readiness).toMatchObject({ valid: 1 });

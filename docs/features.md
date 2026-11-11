@@ -1206,8 +1206,11 @@ another; when one of them changes, comes to the commit, leaves it or closes,
 the others look at the commit again within about a minute. In the API each
 pull request keeps its own status (`status.state`), and
 `status.publishedDescription` says whose the commit shows. This holds for
-`briareus/code-review` as for `briareus/approvals`, and costs one more read of
-GitHub per status write.
+`briareus/code-review` as for `briareus/approvals`, and usually costs one more
+read of GitHub per status write. If the commit lookup omits the current pull
+request (as it does for heads already on the default branch), the server scans
+open pull requests instead, up to 3,000; an incomplete or failed scan withholds
+`success` too.
 
 The requirement explains itself in plain words (`approvals.explanation`, and
 `approvals.reasons` for machines): _"This change is high risk, which asks for 2

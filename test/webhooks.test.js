@@ -602,6 +602,34 @@ describe('the events a delivery can carry', () => {
     ]);
   });
 
+  it.each([
+    'opened',
+    'synchronize',
+    'edited',
+    'closed',
+    'reopened',
+    'labeled',
+    'unlabeled',
+    'assigned',
+    'review_requested',
+  ])('only owes sibling statuses for a change of membership: %s', async (action) => {
+    notePullChanged.mockClear();
+    await githubDelivery('pull_request', {
+      action,
+      repository: { full_name: 'acme/shop' },
+      pull_request: {
+        number: 12,
+        state: 'open',
+        head: { ref: 'feat', sha: 'a'.repeat(40) },
+        base: { ref: 'main' },
+      },
+    });
+    await settle();
+    expect(notePullChanged).toHaveBeenCalledTimes(
+      ['opened', 'synchronize', 'edited', 'closed', 'reopened'].includes(action) ? 1 : 0,
+    );
+  });
+
   it('has the approval requirement looked at again when a review is submitted, not for a comment', async () => {
     noteReviewedOnGithub.mockClear();
     const pull = { pull_request: { number: 12, head: { ref: 'feat' } } };

@@ -240,7 +240,11 @@ beforeEach(async () => {
     vi.fn(async (url, init) => {
       // Which open pull requests are at the commit, asked before every status write: this
       // one alone here. What two that share a head get is in test/review-revision.test.js.
-      if (init.method === 'GET' && /\/commits\/[0-9a-f]+\/pulls/.test(url)) return answer(200, []);
+      if (
+        init.method === 'GET' &&
+        (/\/commits\/[0-9a-f]+\/pulls/.test(url) || url.includes('/pulls?state=open'))
+      )
+        return answer(200, []);
       requests.push({
         url,
         method: init.method,

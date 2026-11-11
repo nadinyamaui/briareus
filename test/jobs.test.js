@@ -5034,7 +5034,7 @@ describe('native Codex code review', () => {
               },
             ]);
           if (url === '/user') return ok({ login: 'briareus-bot', id: 7 });
-          if (/\/commits\/[0-9a-f]+\/pulls/.test(url)) return ok([]);
+          if (/\/commits\/[0-9a-f]+\/pulls/.test(url) || url.includes('/pulls?state=open')) return ok([]);
           // What the label step left on the pull request: the review's own approval.
           if (url.includes('/pulls/77/reviews'))
             return ok([
