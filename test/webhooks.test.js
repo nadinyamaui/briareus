@@ -626,8 +626,30 @@ describe('the events a delivery can carry', () => {
     });
     await settle();
     expect(notePullChanged).toHaveBeenCalledTimes(
-      ['opened', 'synchronize', 'edited', 'closed', 'reopened'].includes(action) ? 1 : 0,
+      ['opened', 'synchronize', 'closed', 'reopened'].includes(action) ? 1 : 0,
     );
+  });
+
+  it('owes sibling statuses for an edit that retargets the pull request, not one of its title', async () => {
+    const edited = (changes) =>
+      githubDelivery('pull_request', {
+        action: 'edited',
+        changes,
+        repository: { full_name: 'acme/shop' },
+        pull_request: {
+          number: 12,
+          state: 'open',
+          head: { ref: 'feat', sha: 'a'.repeat(40) },
+          base: { ref: 'main' },
+        },
+      });
+    notePullChanged.mockClear();
+    await edited({ title: { from: 'Old title' } });
+    await settle();
+    expect(notePullChanged).not.toHaveBeenCalled();
+    await edited({ base: { ref: { from: 'release' }, sha: { from: 'b'.repeat(40) } } });
+    await settle();
+    expect(notePullChanged).toHaveBeenCalledTimes(1);
   });
 
   it('has the approval requirement looked at again when a review is submitted, not for a comment', async () => {

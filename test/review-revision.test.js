@@ -402,7 +402,8 @@ beforeEach(async () => {
           return answer(200, github.openPulls.slice((page - 1) * 100, page * 100));
         }
         const member = /\/collaborators\/([^/]+)\/permission/.exec(path)?.[1];
-        if (member) return answer(200, github.permissions[member] || { permission: 'read' });
+        // Push access unless a test says otherwise, as a collaborator who reviews has.
+        if (member) return answer(200, github.permissions[member] || { permission: 'write' });
         const page = Number(/[?&]page=(\d+)/.exec(path)?.[1] || 1);
         const paged = (list) => answer(200, list.slice((page - 1) * 100, page * 100));
         const what = path === '/user' ? 'user' : /\/pulls\/7\/(\w+)/.exec(path)?.[1] || 'pull';
@@ -1422,6 +1423,7 @@ describe('a commit shared by several pull requests', () => {
       }
       github.pullsAt = (sha) => [{ number: 9, state: 'open', head: { sha } }];
       github.openPulls = [{ number: 9, state: 'open', head: { sha: head } }];
+      github.pull = { ...github.pull, state: 'closed' };
       requests.length = 0;
       const isOpen = vi.fn(async () => false);
       const results = await enforcement.retryReviewStatuses({ getProject: () => project, cfg, isOpen });
@@ -1633,6 +1635,7 @@ describe('approvals given on GitHub', () => {
       review(1, 'read-member', 'APPROVED', { author_association: 'MEMBER' }),
       review(2, 'write-member', 'APPROVED', { author_association: 'MEMBER' }),
     ];
+    github.permissions['read-member'] = { permission: 'read' };
     github.permissions['write-member'] = { permission: 'write' };
     let result = await refresh(project);
     expect(result.approvals.approvals.map((a) => [a.by.name, a.counted])).toEqual([
@@ -1642,6 +1645,46 @@ describe('approvals given on GitHub', () => {
     github.permissions['write-member'] = { permission: 'read' };
     result = await refresh(project);
     expect(result.approvals.valid).toBe(0);
+  });
+
+  it('checks COLLABORATOR push access, since GitHub reports read-only collaborators so too', async () => {
+    reviewed();
+    const project = withPolicy({ acceptGithubApprovals: true });
+    github.reviews = [
+      review(1, 'read-collaborator'),
+      review(2, 'triage-collaborator'),
+      review(3, 'octo-reviewer'),
+    ];
+    github.permissions['read-collaborator'] = { permission: 'read' };
+    github.permissions['triage-collaborator'] = { permission: 'triage' };
+    const result = await refresh(project, { current: { headSha: head, baseRef: 'main' } });
+    expect(result.approvals.approvals.map((a) => [a.by.name, a.counted, a.reason])).toEqual([
+      ['read-collaborator', false, 'not_a_collaborator'],
+      ['triage-collaborator', false, 'not_a_collaborator'],
+      ['octo-reviewer', true, null],
+    ]);
+    expect(asked('/collaborators/')).toHaveLength(3);
+  });
+
+  it('stops counting synced approvals when a facts retry fails before the reviews are read again', async () => {
+    reviewed();
+    github.reviews = [review(1, 'octo-reviewer'), review(2, 'mona-reviewer')];
+    github.files = changed('README.md');
+    // A short list: the files are to be read again.
+    github.pull.changed_files = 5;
+    const project = withPolicy({ acceptGithubApprovals: true });
+    await refresh(project, { current: { headSha: head, baseRef: 'main' } });
+    expect(store.readiness).toMatchObject({ valid: 2, result: 'satisfied' });
+    // One approval is dismissed on GitHub; when the retry is due, the pull request read fails.
+    github.reviews = [review(1, 'octo-reviewer'), review(2, 'mona-reviewer', 'DISMISSED')];
+    github.failing.pull = 502;
+    await sweep(project, Date.parse(store.risk.retryAt) + 1);
+    expect(asked('/reviews?')).toHaveLength(1);
+    expect(store.risk.reviewsSyncedAt).toBeNull();
+    expect(store.readiness).toMatchObject({ valid: 0, result: 'pending' });
+    // Once GitHub answers again, the reviews are read and what stands counts.
+    delete github.failing.pull;
+    expect((await refresh(project)).approvals).toMatchObject({ valid: 1, result: 'pending' });
   });
 
   it('counts no GitHub approvals when MEMBER permission cannot be verified', async () => {

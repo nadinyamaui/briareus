@@ -1077,10 +1077,17 @@ describe('what is owed and swept', () => {
       statusDescription: 'Review passed',
       owed: true,
     }));
+    // The board's word is confirmed with GitHub before a debt never tried is dropped.
+    const github = fetch.getMockImplementation();
+    let state = 'closed';
+    fetch.mockImplementation(async (url, init) =>
+      init.method === 'GET' && url.endsWith('/pulls/7') ? answer(200, { state }) : github(url, init),
+    );
     expect(await sweep(closed)).toEqual([{ repo, prNumber: 7, published: false, skipped: 'closed' }]);
     expect(store.row).toMatchObject({ publishFailedAt: null, publishOwedAt: null });
     expect(posted()).toEqual([]);
     expect(await sweep(closed)).toEqual([]);
+    fetch.mockImplementation(github);
     // A board that cannot say reads as open: the retry goes on.
     answers = [answer(403, { message: 'Forbidden' })];
     await refresh(on);
@@ -1093,6 +1100,36 @@ describe('what is owed and swept', () => {
     expect(await sweep({ ...unreadable, now: () => again })).toEqual([
       { repo, prNumber: 7, published: true },
     ]);
+  });
+
+  it('keeps a debt never tried when the board omits a pull request GitHub says is open', async () => {
+    reviewed();
+    const stale = { isOpen: async () => false };
+    const github = fetch.getMockImplementation();
+    let pull = () => answer(200, { state: 'open' });
+    fetch.mockImplementation(async (url, init) =>
+      init.method === 'GET' && url.endsWith('/pulls/7') ? pull() : github(url, init),
+    );
+    // A policy edit owes the outcome a recomputation, and the board has not caught up.
+    store.row = null;
+    await refresh(on);
+    store.row.recomputeAt = store.now();
+    expect(await sweep(stale)).toEqual([{ repo, prNumber: 7, published: true, skipped: 'unchanged' }]);
+    expect(store.row.recomputeAt).toBeFalsy();
+    // A pull request GitHub cannot be asked about reads as open, as the board's does.
+    await refreshCodeReviewOutcome(repo, 7, {}, () => ({
+      outcome: 'passed',
+      stale: false,
+      reasons: [],
+      headSha: head,
+      baseRef: 'main',
+      statusState: 'success',
+      statusDescription: 'Review passed',
+      owed: true,
+    }));
+    pull = () => answer(502, {});
+    expect(await sweep(stale)).toEqual([{ repo, prNumber: 7, published: true }]);
+    expect(posted().at(-1)).toMatchObject({ state: 'success', description: 'Review passed' });
   });
 
   it('stops asking for a status GitHub will not accept for the commit', async () => {

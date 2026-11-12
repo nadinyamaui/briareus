@@ -86,7 +86,8 @@ const onGithub = (login, over = {}) => ({
   status: 'approved',
   headSha: head,
   baseRef: 'main',
-  association: 'COLLABORATOR',
+  // Push access, as the server verified it (lib/review-revision.js).
+  association: 'WRITE',
   automation: null,
   approvedAt: '2026-11-10T12:00:00.000Z',
   ...over,

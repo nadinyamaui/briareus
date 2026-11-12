@@ -569,7 +569,8 @@ On:
   between storing and sending, and an outcome whose recomputation did not land.
   It drops what nobody is owed any more: the debt of a project that is gone or
   no longer enforces, and any status of a pull request that has closed
-  (checked before the first attempt too). A status GitHub answers 422 to, because
+  (checked before the first attempt too; there the board's word that it closed
+  is confirmed with GitHub, since the board can omit an open pull request). A status GitHub answers 422 to, because
   the commit is gone or holds all the statuses a context may have, is tried
   five times and then left with its error.
 - While GitHub is not known to carry the stored outcome, `status.published` is
@@ -1270,9 +1271,12 @@ it is for SSH approvals. An approval on GitHub from an account no Briareus user
 ever linked is taken for a person's when the project accepts those; whether a
 person or their own tooling used that account is not something the server can
 see, nor that it belongs to somebody who also approved through the API under
-another account. GitHub reports org membership, not write access, as `MEMBER`:
-these reviewers count only after the server verifies their repository push
-permission; a failed permission read counts no GitHub approvals until retried.
+another account. GitHub reports org membership, not write access, as `MEMBER`,
+and outside collaborators at any access level, read and triage included, as
+`COLLABORATOR`: these reviewers count only after the server verifies their
+repository push permission; a failed permission read counts no GitHub approvals
+until retried, and so does a refresh whose pull request read failed, since the
+reviews were then not read again.
 A GitHub approval is bound to the base branch the pull request had when the
 server first saw the approval, not when it was submitted.
 An approver who loses access stops counting in the API at once and on GitHub at
