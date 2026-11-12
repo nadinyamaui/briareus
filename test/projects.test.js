@@ -950,6 +950,70 @@ describe('the security review policy', () => {
   });
 });
 
+describe('the approval policy', () => {
+  const policy = {
+    enabled: true,
+    tiers: { high: { approvals: 2, requireSecurity: true } },
+    rules: [{ pattern: '/migrations/', tier: 'high', label: 'Schema' }],
+  };
+
+  it('is none unless set, and is stored checked and filled in', async () => {
+    const saved = await createProject({ ...base });
+    expect(saved.approvalPolicy).toBeNull();
+    const updated = await updateProject(saved.id, { approvalPolicy: policy });
+    expect(updated.approvalPolicy).toEqual({
+      enabled: true,
+      tiers: {
+        low: { approvals: 0, requireSecurity: false },
+        medium: { approvals: 1, requireSecurity: false },
+        high: { approvals: 2, requireSecurity: true },
+      },
+      rules: [{ pattern: '/migrations/', tier: 'high', label: 'Schema', approvals: null }],
+      thresholds: {},
+      acceptGithubApprovals: false,
+      allowSelfApproval: false,
+      securitySignalTier: null,
+    });
+    // An edit that names other things leaves it alone; null removes it.
+    expect((await updateProject(saved.id, { label: 'Renamed' })).approvalPolicy).toEqual(
+      updated.approvalPolicy,
+    );
+    expect((await updateProject(saved.id, { approvalPolicy: null })).approvalPolicy).toBeNull();
+  });
+
+  it('refuses a policy it does not understand, and keeps the one it had', async () => {
+    const saved = await createProject({ ...base, approvalPolicy: policy });
+    for (const [bad, why] of [
+      [{ ...policy, enabled: 'yes' }, /enabled must be true or false/],
+      [{ ...policy, rules: [{ pattern: '!/docs/', tier: 'low' }] }, /negation/],
+      [{ ...policy, rules: [{ pattern: '/src/[a-z].js', tier: 'high' }] }, /character classes/],
+      [{ ...policy, tiers: { medium: { approvals: 3 } } }, /cannot ask for fewer/],
+      [{ ...policy, runtime: { model: 'other' } }, /unknown fields: runtime/],
+      ['strict', /must be an object/],
+    ])
+      await expect(updateProject(saved.id, { approvalPolicy: bad })).rejects.toThrow(why);
+    expect(getProject(base.repo).approvalPolicy.rules).toHaveLength(1);
+    await expect(
+      createProject({ ...base, repo: 'acme/loose', approvalPolicy: { rules: [] } }),
+    ).rejects.toThrow(/enabled must be true or false/);
+  });
+
+  it('never carries a provider, a model or an effort', async () => {
+    const saved = await createProject({ ...base, actionModel: 'configured-model', approvalPolicy: policy });
+    for (const field of ['provider', 'providerId', 'model', 'effort'])
+      await expect(
+        updateProject(saved.id, {
+          approvalPolicy: { ...policy, tiers: { high: { approvals: 2, [field]: 'x' } } },
+        }),
+      ).rejects.toThrow(/unknown fields/);
+    // Saving the policy changes nothing about what a review runs on.
+    const before = getProject(base.repo);
+    const after = await updateProject(saved.id, { approvalPolicy: { ...policy, allowSelfApproval: true } });
+    for (const key of ['actionProviderId', 'actionModel', 'actionEffort', 'stepRuntimes', 'securityReview'])
+      expect(after[key]).toEqual(before[key]);
+  });
+});
+
 describe('settings the review outcome is computed from', () => {
   let changes;
   beforeEach(() => {
@@ -982,7 +1046,24 @@ describe('settings the review outcome is computed from', () => {
     });
     await updateProject(saved.id, { securityReview: 'off' });
     expect(changes.at(-1)).toBe('off');
-    expect(OUTCOME_SETTINGS).toEqual(['securityReview', 'enforceReviewOutcome', 'reviewRoundLimit']);
+    // The approval policy is one of them, compared by what it says.
+    changes = [];
+    onOutcomeSettingsChange(async (project, changed) => {
+      changes.push(changed);
+    });
+    const policy = { enabled: true, rules: [{ pattern: '/db/', tier: 'high' }] };
+    await updateProject(saved.id, { approvalPolicy: policy });
+    await updateProject(saved.id, { approvalPolicy: policy });
+    await updateProject(saved.id, { approvalPolicy: { ...policy, allowSelfApproval: true } });
+    await updateProject(saved.id, { approvalPolicy: null });
+    await updateProject(saved.id, { approvalPolicy: null });
+    expect(changes).toEqual([['approvalPolicy'], ['approvalPolicy'], ['approvalPolicy']]);
+    expect(OUTCOME_SETTINGS).toEqual([
+      'securityReview',
+      'enforceReviewOutcome',
+      'reviewRoundLimit',
+      'approvalPolicy',
+    ]);
   });
 
   it('marks stored outcomes without a cold GitHub board fetch delaying subsequent edits', async () => {

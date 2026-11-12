@@ -236,3 +236,66 @@ describe('operator attention', () => {
     );
   });
 });
+
+describe('a pull request waiting on a human approval', () => {
+  const waiting = {
+    repo: 'acme/shop',
+    prNumber: 7,
+    headSha: 'b'.repeat(40),
+    tier: 'high',
+    required: 2,
+    valid: 1,
+    waitingSince: '2026-11-10T12:00:00.000Z',
+  };
+
+  it('is listed with its tier and how many approvals are missing, and belongs to no session', () => {
+    const [item] = attentionItems([], [], [], [], [], [waiting]);
+    expect(item).toEqual({
+      id: 'review-approval:acme/shop#7',
+      kind: 'review-approval',
+      sessionId: null,
+      taskId: null,
+      revision: `${'b'.repeat(40)}:1/2`,
+      repo: 'acme/shop',
+      prNumber: 7,
+      title: 'PR #7',
+      summary:
+        'The code review of bbbbbbb passed and the change is high risk: 1 more human approval is needed (1 of 2 given). Approve that revision through Briareus once you have looked at it.',
+      href: 'https://github.com/acme/shop/pull/7',
+      at: '2026-11-10T12:00:00.000Z',
+    });
+    expect(attentionItems([], [], [], [], [], [{ ...waiting, valid: 0 }])[0].summary).toContain(
+      '2 more human approvals are needed (0 of 2 given)',
+    );
+  });
+
+  it('is news again with each approval and each new head, not with each poll', () => {
+    const revision = (over) => attentionItems([], [], [], [], [], [{ ...waiting, ...over }])[0].revision;
+    expect(revision({})).toBe(revision({ waitingSince: '2026-11-10T13:00:00.000Z' }));
+    expect(revision({ valid: 0 })).not.toBe(revision({}));
+    expect(revision({ headSha: 'c'.repeat(40) })).not.toBe(revision({}));
+  });
+
+  it('lists a failed approvals status apart from the outcome’s', () => {
+    const failing = {
+      repo: 'acme/shop',
+      prNumber: 7,
+      headSha: 'b'.repeat(40),
+      outcome: 'pending',
+      state: 'pending',
+      publishedSha: null,
+      publishedState: null,
+      error: 'GitHub answered 403',
+      failedAt: '2026-11-10T12:00:00.000Z',
+      retryAt: '2026-11-10T12:08:00.000Z',
+    };
+    const items = attentionItems([], [], [], [], [failing, { ...failing, context: 'briareus/approvals' }]);
+    expect(items.map((item) => item.id).sort()).toEqual([
+      'review-status:acme/shop#7',
+      'review-status:acme/shop#7:briareus/approvals',
+    ]);
+    expect(items.find((item) => item.id.endsWith('approvals')).summary).toMatch(
+      /^The approval requirement \(pending\) could not be published as the commit status `briareus\/approvals` on bbbbbbb: GitHub answered 403\./,
+    );
+  });
+});

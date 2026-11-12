@@ -66,6 +66,8 @@ const state = vi.hoisted(() => ({
       decisions: state.outcome.decisions,
       count: pull ? { ...pull.count } : null,
       rounds: pull ? pull.rounds.map((r) => ({ ...r })) : [],
+      // What the server read about the revision, for a project with an approval policy.
+      risk: state.outcome.risk || null,
     };
   },
   claimRound(request, decide) {
@@ -293,6 +295,18 @@ vi.mock('../lib/db.js', () => ({
   listFailedCodeReviewStatuses: vi.fn(async () => []),
   listCodeReviewOutcomesDue: vi.fn(async () => []),
   listCodeReviewStages: vi.fn(async () => state.outcome.stages.map((s) => ({ ...s }))),
+  getCodeReviewRisk: vi.fn(async () => state.outcome.risk || null),
+  saveCodeReviewRisk: vi.fn(async (repo, prNumber, risk) => {
+    state.outcome.risk = { repo, prNumber, ...risk, retryAt: null, observedAt: 'now', updatedAt: 'now' };
+    return state.outcome.risk;
+  }),
+  syncGithubCodeReviewApprovals: vi.fn(async () => {}),
+  // One pull request per commit here: what several at one head get is in
+  // test/review-revision.test.js.
+  listCodeReviewStatusesAtHead: vi.fn(async () => []),
+  oweCodeReviewStatusesAtHead: vi.fn(async () => 0),
+  clearCodeReviewWaiting: vi.fn(async () => {}),
+  recordCodeReviewCommitOwners: vi.fn(async () => 0),
 }));
 
 vi.mock('../lib/github.js', async (importOriginal) => ({
@@ -402,6 +416,8 @@ import {
   saveJobEvents,
   restartCodeReview,
   getCodeReviewByJob,
+  syncGithubCodeReviewApprovals,
+  recordCodeReviewCommitOwners,
   listCodeReviewFindings,
   updateCodeReviewFinding,
   listCodeReviewDecisions,
@@ -415,6 +431,7 @@ import {
   setCodeReviewStage,
 } from '../lib/db.js';
 import { reviewHistoryOf } from '../lib/review-history.js';
+import { normalizeApprovalPolicy } from '../lib/review-risk.js';
 import { forgetBrowser, startBrowser, stopBrowser } from '../lib/browser.js';
 import { ensureSessionDatabase, dropSessionDatabase } from '../lib/dbpool.js';
 import { latestTestVerdict } from '../lib/qa-verdict.js';
@@ -3218,6 +3235,9 @@ describe('native Codex code review', () => {
           return ok({});
         }
         if (method !== 'GET') throw new Error(`Unexpected GitHub write: ${method} ${url}`);
+        // Which open pull requests are at the commit, asked before a status is written.
+        if (/\/commits\/[0-9a-f]+\/pulls/.test(url))
+          return ok([{ number: 77, state: 'open', head: { sha: head } }]);
         if (url.includes('/labels')) return ok(labels.map((name) => ({ name })));
         if (url.includes('/reviews?')) return ok(reviews());
         if (url === '/user') return ok({ login: 'briareus-bot' });
@@ -5132,6 +5152,324 @@ describe('native Codex code review', () => {
       expect(fs.existsSync(claimsPath())).toBe(false);
       await vi.waitFor(() => expect(state.outcome.row.outcome).toBe('passed'));
       expect(security()).toMatchObject({ policy: 'off', result: 'not_required', blocking: false });
+    });
+
+    describe('made required by the risk of the change', () => {
+      // A project that leaves the pass advisory, and requires it on high-risk changes.
+      const risky = (over = {}) =>
+        normalizeApprovalPolicy({
+          enabled: true,
+          tiers: { high: { approvals: 2, requireSecurity: true } },
+          rules: [{ pattern: '/migrations/', tier: 'high', label: 'Schema' }],
+          ...over,
+        });
+      // The pull request and its changed files, as GitHub answers the server for them.
+      const changes = (paths, { files = null } = {}) =>
+        githubRest.mockImplementation(async (_cfg, _method, url) => {
+          const ok = (json) => ({ ok: true, status: 200, json: async () => json });
+          if (url.includes('/pulls/77/files'))
+            return (
+              files ||
+              ok(paths.map((filename) => ({ filename, status: 'modified', additions: 1, deletions: 0 })))
+            );
+          if (url.includes('/pulls/77/commits'))
+            return ok([
+              {
+                sha: head,
+                author: { login: 'octo-author', id: 900 },
+                committer: { login: 'octo-author', id: 900 },
+              },
+            ]);
+          if (url === '/user') return ok({ login: 'briareus-bot', id: 7 });
+          if (/\/commits\/[0-9a-f]+\/pulls/.test(url) || url.includes('/pulls?state=open')) return ok([]);
+          // What the label step left on the pull request: the review's own approval.
+          if (url.includes('/pulls/77/reviews'))
+            return ok([
+              {
+                id: 55,
+                state: 'APPROVED',
+                commit_id: head,
+                submitted_at: new Date().toISOString(),
+                author_association: 'COLLABORATOR',
+                user: { login: 'briareus-bot', id: 7, type: 'User' },
+              },
+            ]);
+          return ok({
+            number: 77,
+            state: 'open',
+            head: { ref: 'feature', sha: head },
+            base: { ref: baseRef },
+            user: { login: 'octo-author' },
+            changed_files: paths.length,
+            commits: 1,
+            html_url: 'https://github.com/acme/shop/pull/77',
+          });
+        });
+      const asked = (part) => githubRest.mock.calls.filter(([, , url]) => url.includes(part));
+
+      beforeEach(() => {
+        state.projects[0].securityReview = 'advisory';
+        state.projects[0].approvalPolicy = risky();
+      });
+      afterEach(() => {
+        delete state.projects[0].approvalPolicy;
+        delete state.outcome.risk;
+      });
+
+      it('runs the pass as a required one on a high-risk change, with the review’s own command and runtime', async () => {
+        changes(['src/cart.js', 'migrations/002_orders.sql']);
+        stored();
+        sendDevMessage(id, '/review');
+        await vi.waitFor(() => expect(invocations).toHaveLength(1));
+        // The tier was read from GitHub before the steps were chosen, by the server.
+        expect(asked('/pulls/77/files')).toHaveLength(1);
+        expect(job.codeReviewSecurity).toEqual({ head, policy: 'required', raisedBy: 'high' });
+        expect(beginCodeReviewStages.mock.calls[0][1].stages).toEqual([
+          'discover',
+          'security',
+          'publish',
+          'delegation',
+          'verify',
+          'label',
+        ]);
+        expect(state.outcome.risk).toMatchObject({ headSha: head, tier: 'high', complete: true });
+        // Discovery is the provider's own command on the session's runtime, as ever.
+        const native = invocations[0];
+        expect(native.args.slice(0, 5)).toEqual(['exec', 'review', '--json', '--base', base]);
+        expect(native.args.slice(-2)).toEqual(['--output-last-message', summaryPath]);
+        fs.writeFileSync(summaryPath, 'A candidate finding');
+        finishReview(native);
+        const pass = await turn(1);
+        expect(pass.child.rpc.find((r) => r.method === 'thread/resume').params).toMatchObject({
+          threadId: 'native-review-thread',
+          model: 'gpt-6.1-sol',
+        });
+        expect(pass.args).toContain('model_reasoning_effort="low"');
+        expect(job.recoveryTurn).toMatchObject({
+          opts: { codeReviewStage: 'security' },
+          runtime: { providerId: 1, model: 'gpt-6.1-sol', effort: 'low' },
+        });
+        expect(texts()).toContain(
+          'Security pass (required for this pull request, whose change is high risk): a second, security-only discovery on the same runtime, before anything is published.',
+        );
+        // Held to it like a project's own required pass: one that leaves no record fails
+        // the review's security result, and the outcome with it.
+        finishTurn(pass);
+        finishTurn(await turn(2));
+        await finishRest(3);
+        await vi.waitFor(() => expect(state.outcome.row.outcome).toBe('incomplete'));
+        expect(security()).toMatchObject({ policy: 'required', blocking: true, requiredByRisk: 'high' });
+        // What the label step approved is put on record as the review's own, although
+        // this project counts no approval given on GitHub.
+        await vi.waitFor(() =>
+          expect(syncGithubCodeReviewApprovals).toHaveBeenCalledWith('acme/shop', 77, {
+            rows: [expect.objectContaining({ githubReviewId: 55, automation: 'review_label_step' })],
+            dismissed: [],
+            seenAt: expect.any(Number),
+          }),
+        );
+        expect(publicJob(job)).not.toHaveProperty('codeReviewRecord');
+      });
+
+      it('leaves a low-risk change to the project’s own advisory pass', async () => {
+        changes(['src/cart.js']);
+        stored();
+        sendDevMessage(id, '/review');
+        await vi.waitFor(() => expect(invocations).toHaveLength(1));
+        expect(job.codeReviewSecurity).toEqual({ head, policy: 'advisory' });
+        fs.writeFileSync(summaryPath, 'A candidate finding');
+        finishReview(invocations[0]);
+        await turn(1);
+        expect(texts()).toContain(
+          'Security pass (advisory for this project): a second, security-only discovery on the same runtime, before anything is published.',
+        );
+        cancelDevTurn(id);
+        invocations[1].child.emit('close', null);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+      });
+
+      it('requires the pass when the changed files cannot be read before discovery', async () => {
+        changes([], { files: { ok: false, status: 502, json: async () => ({}) } });
+        stored();
+        sendDevMessage(id, '/review');
+        await vi.waitFor(() => expect(invocations).toHaveLength(1));
+        expect(job.codeReviewSecurity).toEqual({ head, policy: 'required', raisedBy: 'high' });
+        expect(state.outcome.risk).toMatchObject({ complete: false, tier: 'high' });
+        cancelDevTurn(id);
+        invocations[0].child.emit('close', null);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+      });
+
+      it('runs a pass on a high-risk change of a project that otherwise runs none, and none on a low-risk one', async () => {
+        delete state.projects[0].securityReview;
+        changes(['migrations/002_orders.sql']);
+        stored();
+        sendDevMessage(id, '/review');
+        await vi.waitFor(() => expect(invocations).toHaveLength(1));
+        expect(job.codeReviewSecurity).toEqual({ head, policy: 'required', raisedBy: 'high' });
+        cancelDevTurn(id);
+        invocations[0].child.emit('close', null);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+      });
+
+      it.each([false, true])(
+        'records newly reachable commits independent of backdating (%s)',
+        async (backdated) => {
+          // A review session, which is as able to commit as any: its owner tells it to.
+          job.ownerId = 4;
+          recordCodeReviewCommitOwners.mockClear();
+          changes(['src/cart.js']);
+          stored();
+          // A turn in which nothing is committed records nothing.
+          sendDevMessage(id, '/review');
+          await vi.waitFor(() => expect(invocations).toHaveLength(1));
+          cancelDevTurn(id);
+          invocations[0].child.emit('close', null);
+          await vi.waitFor(() => expect(job.status).toBe('idle'));
+          expect(job).not.toHaveProperty('commitWatch');
+          expect(recordCodeReviewCommitOwners).not.toHaveBeenCalled();
+          sendDevMessage(id, '/review');
+          await vi.waitFor(() => expect(invocations).toHaveLength(2));
+          // Noted when the turn started, kept with the session and never shown to a client.
+          expect(job.commitWatch).toMatchObject({ head });
+          expect(publicJob(job)).not.toHaveProperty('commitWatch');
+          // While the turn runs the agent commits in the checkout.
+          const commit = (message) =>
+            spawnSync(
+              'git',
+              [
+                '-C',
+                root,
+                '-c',
+                'user.name=Server',
+                '-c',
+                'user.email=server@example.com',
+                'commit',
+                '--allow-empty',
+                '-m',
+                message,
+              ],
+              {
+                env: { ...process.env, ...(backdated ? { GIT_COMMITTER_DATE: '2020-01-01T00:00:00Z' } : {}) },
+              },
+            );
+          commit('One');
+          commit('Two');
+          // A base commit created elsewhere during this turn, merged into the checkout.
+          const tree = spawnSync('git', ['-C', root, 'rev-parse', `${head}^{tree}`], {
+            encoding: 'utf8',
+          }).stdout.trim();
+          const imported = spawnSync(
+            'git',
+            [
+              '-C',
+              root,
+              '-c',
+              'user.name=Other',
+              '-c',
+              'user.email=other@example.com',
+              'commit-tree',
+              tree,
+              '-p',
+              head,
+              '-m',
+              'Imported base',
+            ],
+            { encoding: 'utf8' },
+          ).stdout.trim();
+          expect(imported).toMatch(/^[0-9a-f]{40}$/);
+          expect(
+            spawnSync('git', [
+              '-C',
+              root,
+              '-c',
+              'user.name=Server',
+              '-c',
+              'user.email=server@example.com',
+              'merge',
+              '--no-ff',
+              imported,
+              '-m',
+              'Merge base',
+            ]).status,
+          ).toBe(0);
+          // Locally authored commits on a merged side branch still belong to this owner.
+          expect(spawnSync('git', ['-C', root, 'checkout', '-b', 'local-work']).status).toBe(0);
+          commit('Three');
+          expect(spawnSync('git', ['-C', root, 'checkout', 'feature']).status).toBe(0);
+          expect(
+            spawnSync('git', [
+              '-C',
+              root,
+              '-c',
+              'user.name=Server',
+              '-c',
+              'user.email=server@example.com',
+              'merge',
+              '--no-ff',
+              'local-work',
+              '-m',
+              'Merge local work',
+            ]).status,
+          ).toBe(0);
+          const made = spawnSync('git', ['-C', root, 'rev-list', `${head}..HEAD`], {
+            encoding: 'utf8',
+          })
+            .stdout.trim()
+            .split('\n');
+          expect(made).toHaveLength(6);
+          // Base-only SHAs are filtered by the actual PR commit list when workers are read.
+          expect(made).toContain(imported);
+          cancelDevTurn(id);
+          invocations[1].child.emit('close', null);
+          await vi.waitFor(() => expect(job.status).toBe('idle'));
+          await vi.waitFor(() =>
+            expect(recordCodeReviewCommitOwners).toHaveBeenCalledWith('acme/shop', {
+              userId: 4,
+              jobId: id,
+              branch: 'feature',
+              shas: made,
+            }),
+          );
+          expect(job).not.toHaveProperty('commitWatch');
+          delete job.ownerId;
+        },
+      );
+
+      it('keeps no such record for a session nobody owns, or a project without a policy', async () => {
+        recordCodeReviewCommitOwners.mockClear();
+        changes(['src/cart.js']);
+        stored();
+        sendDevMessage(id, '/review');
+        await vi.waitFor(() => expect(invocations).toHaveLength(1));
+        expect(job).not.toHaveProperty('commitWatch');
+        cancelDevTurn(id);
+        invocations[0].child.emit('close', null);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+        job.ownerId = 4;
+        delete state.projects[0].approvalPolicy;
+        sendDevMessage(id, '/review');
+        await vi.waitFor(() => expect(invocations).toHaveLength(2));
+        expect(job).not.toHaveProperty('commitWatch');
+        cancelDevTurn(id);
+        invocations[1].child.emit('close', null);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+        expect(recordCodeReviewCommitOwners).not.toHaveBeenCalled();
+        delete job.ownerId;
+      });
+
+      it('reads nothing before discovery when no tier requires the pass', async () => {
+        state.projects[0].approvalPolicy = risky({ tiers: { high: { approvals: 2 } } });
+        changes(['migrations/002_orders.sql']);
+        // The review row is not there yet, so nothing is computed for it either.
+        sendDevMessage(id, '/review');
+        await vi.waitFor(() => expect(invocations).toHaveLength(1));
+        expect(job.codeReviewSecurity).toEqual({ head, policy: 'advisory' });
+        expect(beginCodeReviewStages.mock.calls[0][1].stages).toContain('security');
+        cancelDevTurn(id);
+        invocations[0].child.emit('close', null);
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+      });
     });
 
     it('decides the pass when discovery starts: a policy switched on while a review runs waits for the next one', async () => {

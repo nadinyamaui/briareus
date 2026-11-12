@@ -262,6 +262,18 @@ under every policy, like any required fix; a pass that did not run or did not
 complete blocks under `required` and does not under `advisory` (see
 [Security review](docs/features.md#security-review)).
 
+A project's `approvalPolicy` (none by default) makes human approvals a
+requirement that follows risk. The server assesses each reviewed pull request
+from its changed files, against the project's sensitive-path rules and size
+thresholds, into a tier that asks for a number of approvals and can make the
+security pass required; it never changes the provider, model or effort a review
+runs on. An approval counts when the server can attribute it to a person: one
+recorded through the client API with that person's own token, bound to the
+exact head and base branch, or, where the project accepts them, one on GitHub
+from an account no session acts as. The result is published as its own commit
+status, `briareus/approvals`, beside `briareus/code-review` (see
+[Risk-based human approvals](docs/features.md#risk-based-human-approvals)).
+
 A session’s `qaLoop` starts QA when the task settles on an open pull request. QA
 writes and executes a test sheet and reports passed, failed, or incomplete coverage.
 A new head invalidates the previous result. Disarming QA leaves any running QA

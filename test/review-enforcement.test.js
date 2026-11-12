@@ -145,6 +145,8 @@ vi.mock('../lib/db.js', () => ({
     });
   }),
   listFailedCodeReviewStatuses: vi.fn(async () => (store.row?.publishFailedAt ? [{ ...store.row }] : [])),
+  listCodeReviewStatusesAtHead: vi.fn(async () => []),
+  oweCodeReviewStatusesAtHead: vi.fn(async () => 0),
   listCodeReviewOutcomesDue: vi.fn(async ({ now }) => {
     const row = store.row;
     const due =
@@ -251,6 +253,13 @@ beforeEach(async () => {
   vi.stubGlobal(
     'fetch',
     vi.fn(async (url, init) => {
+      // Which open pull requests are at the commit, asked before every status write: this
+      // one alone here. What two that share a head get is in test/review-revision.test.js.
+      if (
+        init.method === 'GET' &&
+        (/\/commits\/[0-9a-f]+\/pulls/.test(url) || url.includes('/pulls?state=open'))
+      )
+        return answer(200, []);
       requests.push({
         url,
         method: init.method,
@@ -915,7 +924,10 @@ describe('what GitHub is known to carry', () => {
     take(head, { state: 'failure', context: 'ci/build', description: 'Tests failed' });
     expect((await refresh(on)).published).toEqual({ published: true, skipped: 'unchanged' });
     // A read that fails proves nothing either way, so the status is sent again.
-    fetch.mockImplementationOnce(async () => answer(502, {}));
+    const github = fetch.getMockImplementation();
+    fetch.mockImplementation(async (url, init) =>
+      init.method === 'GET' && url.includes('/statuses') ? answer(502, {}) : github(url, init),
+    );
     expect((await refresh(on)).published).toEqual({ published: true });
     expect(posted()).toHaveLength(3);
   });
@@ -1051,11 +1063,10 @@ describe('what is owed and swept', () => {
     expect(posted()).toHaveLength(1);
   });
 
-  it('gives up a failing status of a pull request that closed, and still makes the first attempt', async () => {
+  it('drops a closed pull request’s debt before the first attempt and retries when its state is unreadable', async () => {
     reviewed();
     const closed = { isOpen: async () => false };
-    // Owed and never tried: sent, closed or not. A status on a closed pull request's
-    // head harms nobody, and the board may simply not list the pull request.
+    // A closed PR can share a head with a live one: even a first write is skipped.
     await refreshCodeReviewOutcome(repo, 7, {}, () => ({
       outcome: 'passed',
       stale: false,
@@ -1066,18 +1077,17 @@ describe('what is owed and swept', () => {
       statusDescription: 'Review passed',
       owed: true,
     }));
-    answers = [answer(403, { message: 'Forbidden' })];
-    const [first] = await sweep(closed);
-    expect(first).toMatchObject({ published: false });
-    expect(first.error).toContain('GitHub answered 403');
-    expect(posted()).toHaveLength(1);
-    // It failed, and the pull request is closed: nobody is waiting for that status.
-    const due = Date.parse(store.row.publishRetryAt);
-    expect(await sweep({ ...closed, now: () => due })).toEqual([
-      { repo, prNumber: 7, published: false, skipped: 'closed' },
-    ]);
+    // The board's word is confirmed with GitHub before a debt never tried is dropped.
+    const github = fetch.getMockImplementation();
+    let state = 'closed';
+    fetch.mockImplementation(async (url, init) =>
+      init.method === 'GET' && url.endsWith('/pulls/7') ? answer(200, { state }) : github(url, init),
+    );
+    expect(await sweep(closed)).toEqual([{ repo, prNumber: 7, published: false, skipped: 'closed' }]);
     expect(store.row).toMatchObject({ publishFailedAt: null, publishOwedAt: null });
-    expect(posted()).toHaveLength(1);
+    expect(posted()).toEqual([]);
+    expect(await sweep(closed)).toEqual([]);
+    fetch.mockImplementation(github);
     // A board that cannot say reads as open: the retry goes on.
     answers = [answer(403, { message: 'Forbidden' })];
     await refresh(on);
@@ -1090,6 +1100,36 @@ describe('what is owed and swept', () => {
     expect(await sweep({ ...unreadable, now: () => again })).toEqual([
       { repo, prNumber: 7, published: true },
     ]);
+  });
+
+  it('keeps a debt never tried when the board omits a pull request GitHub says is open', async () => {
+    reviewed();
+    const stale = { isOpen: async () => false };
+    const github = fetch.getMockImplementation();
+    let pull = () => answer(200, { state: 'open' });
+    fetch.mockImplementation(async (url, init) =>
+      init.method === 'GET' && url.endsWith('/pulls/7') ? pull() : github(url, init),
+    );
+    // A policy edit owes the outcome a recomputation, and the board has not caught up.
+    store.row = null;
+    await refresh(on);
+    store.row.recomputeAt = store.now();
+    expect(await sweep(stale)).toEqual([{ repo, prNumber: 7, published: true, skipped: 'unchanged' }]);
+    expect(store.row.recomputeAt).toBeFalsy();
+    // A pull request GitHub cannot be asked about reads as open, as the board's does.
+    await refreshCodeReviewOutcome(repo, 7, {}, () => ({
+      outcome: 'passed',
+      stale: false,
+      reasons: [],
+      headSha: head,
+      baseRef: 'main',
+      statusState: 'success',
+      statusDescription: 'Review passed',
+      owed: true,
+    }));
+    pull = () => answer(502, {});
+    expect(await sweep(stale)).toEqual([{ repo, prNumber: 7, published: true }]);
+    expect(posted().at(-1)).toMatchObject({ state: 'success', description: 'Review passed' });
   });
 
   it('stops asking for a status GitHub will not accept for the commit', async () => {
