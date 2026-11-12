@@ -404,7 +404,7 @@ describe('the benchmark runner', () => {
     expect(await store.listRunningRuns()).toEqual([]);
   });
 
-  it('keeps a cleanup that failed owed and does it later', async () => {
+  it('keeps a cleanup that failed owed and does it later, without holding the run open', async () => {
     store.add({ id: 1 }, [caseOf('one')]);
     const r = runner();
     await r.tick();
@@ -414,10 +414,50 @@ describe('the benchmark runner', () => {
     let result = (await store.getRun(null, 1)).results[0];
     expect(result).toMatchObject({ state: 'done', cleanedAt: null });
     expect(result.cleanupError).toContain('503');
-    expect((await store.getRun(null, 1)).status).toBe('running');
+    // Every case has ended, so the run has, and the project may start another one; the
+    // cleanup it still owes keeps it on the runner's list.
+    expect((await store.getRun(null, 1)).status).toBe('completed');
+    expect(await store.listRunningRuns()).toEqual([1]);
     await r.tick();
     result = (await store.getRun(null, 1)).results[0];
     expect(result.cleanedAt).not.toBeNull();
+    expect(await store.listRunningRuns()).toEqual([]);
+  });
+
+  it('stops the review of a case that fails for good while it is reviewed', async () => {
+    store.add({ id: 1 }, [caseOf('one')]);
+    const r = runner();
+    await r.tick();
+    expect((await store.getRun(null, 1)).results[0].state).toBe('reviewing');
+    project = { repo, reviewBenchmark: false };
+    await r.tick();
+    expect((await store.getRun(null, 1)).results[0]).toMatchObject({ state: 'failed' });
+    expect(closed).toEqual(['job-100-0']);
+    expect(gh.pulls[0].state).toBe('closed');
+    expect((await store.getRun(null, 1)).status).toBe('completed');
+  });
+
+  it('gives up on a review whose state cannot be read once it is out of time', async () => {
+    store.add({ id: 1 }, [caseOf('one')]);
+    let reading = true;
+    const r = runner({
+      timeoutMs: 1000,
+      findReview: async (_repo, prNumber) => {
+        if (!reading) throw new Error('The database is unavailable');
+        return reviews.get(prNumber) || null;
+      },
+    });
+    await r.tick();
+    reading = false;
+    await r.tick();
+    expect((await store.getRun(null, 1)).results[0]).toMatchObject({
+      state: 'reviewing',
+      error: 'The database is unavailable',
+    });
+    clock += 1001;
+    await r.tick();
+    expect((await store.getRun(null, 1)).results[0]).toMatchObject({ state: 'failed' });
+    expect(closed).toEqual(['job-100-0']);
     expect((await store.getRun(null, 1)).status).toBe('completed');
   });
 });

@@ -1024,6 +1024,11 @@ api.use(
           coreRevision,
           securityReview: project.securityReview || 'off',
           enforceReviewOutcome: project.enforceReviewOutcome === true,
+          reviewRoundLimit: project.reviewRoundLimit ?? null,
+          // It can raise the security pass to required by risk, which changes outcomes.
+          approvalPolicy: project.approvalPolicy
+            ? createHash('sha256').update(JSON.stringify(project.approvalPolicy)).digest('hex').slice(0, 16)
+            : null,
           reviewLabels: createHash('sha256')
             .update(templateText('reviewLabels', project))
             .digest('hex')

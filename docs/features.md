@@ -1327,7 +1327,8 @@ there and closes them again, so it is refused on any other project.
   second pull request nor starts a second review; a review that has not ended
   within six hours is given up on. A run records the runtime it started under
   and the review configuration (the server's commit, `securityReview`,
-  `enforceReviewOutcome`, a fingerprint of the label template). To evaluate a
+  `enforceReviewOutcome`, `reviewRoundLimit`, fingerprints of the approval
+  policy and the label template). To evaluate a
   prompt, tool or runtime change, run once before it and once after: a run takes
   no runtime of its own, so the comparison is of the project's settings as they
   are, not of a silent switch.

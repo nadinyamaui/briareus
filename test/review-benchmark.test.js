@@ -390,4 +390,21 @@ describe('summarizeRun and compareRuns', () => {
     ]);
     expect(c.caveats.join('\n')).toContain('changed their answer');
   });
+
+  it('calls two runs alike only when their reviews ran on the same runtime too', () => {
+    const run = (id, results) => ({
+      run: { id, label: null, runtime: { model: 'a' }, configuration: {} },
+      results,
+    });
+    const alike = compareRuns(
+      run(1, [result('x', clean, review([]))]),
+      run(2, [result('x', clean, review([]))]),
+    );
+    expect(alike.caveats.join('\n')).toContain('same runtime and review configuration');
+    const mixed = compareRuns(
+      run(1, [result('x', clean, review([]))]),
+      run(2, [result('x', clean, review([], { model: 'sonnet' }))]),
+    );
+    expect(mixed.caveats.join('\n')).not.toContain('same runtime and review configuration');
+  });
 });
