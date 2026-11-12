@@ -372,7 +372,8 @@ beforeEach(async () => {
     reviews: [],
     permissions: {},
     user: { login: 'briareus-bot' },
-    // Set to a status, or to a function, to make that read fail.
+    // Persistent refusals use 422 so these tests exercise the stored observation
+    // retries; transient transport retries are covered in github.test.js.
     failing: {},
   };
   vi.stubGlobal(
@@ -641,7 +642,7 @@ describe('the risk the server reads for a revision', () => {
   });
 
   it.each([
-    ['GitHub answers an error for the files', () => (github.failing.files = 502), 'github_error', true],
+    ['GitHub answers an error for the files', () => (github.failing.files = 422), 'github_error', true],
     ['the pull request cannot be read', () => (github.failing.pull = 404), 'github_error', true],
     [
       'GitHub lists fewer files than the pull request changes',
@@ -702,7 +703,7 @@ describe('the risk the server reads for a revision', () => {
 
   it('tries a failed read again from the sweep, with a backoff, and gives up after a few', async () => {
     reviewed();
-    github.failing.files = 502;
+    github.failing.files = 422;
     const project = withPolicy();
     await refresh(project, { current: { headSha: head, baseRef: 'main' } });
     const first = Date.parse(store.risk.retryAt);
@@ -724,7 +725,7 @@ describe('the risk the server reads for a revision', () => {
     expect(store.readiness).toMatchObject({ tier: 'high', required: 2 });
 
     // A read that keeps failing stops being tried, and stays unknown.
-    github.failing.files = 502;
+    github.failing.files = 422;
     github.pull = { ...github.pull, head: { sha: next } };
     reviewed(next);
     let now = Date.now();
@@ -744,7 +745,7 @@ describe('the risk the server reads for a revision', () => {
 
   it('is no dead end once the sweep gave up: read again when a person asks, and by itself after an hour', async () => {
     reviewed();
-    github.failing.files = 502;
+    github.failing.files = 422;
     const project = withPolicy();
     let now = Date.parse('2026-11-10T12:00:00Z');
     const compute = (options = {}) =>
@@ -807,7 +808,7 @@ describe('the risk the server reads for a revision', () => {
   it('keeps the two reads apart: the commits failing does not unsay what the files gave', async () => {
     reviewed();
     github.files = changed('src/cart.js');
-    github.failing.commits = 502;
+    github.failing.commits = 422;
     const project = withPolicy();
     const outcome = await refresh(project, { current: { headSha: head, baseRef: 'main' } });
     expect(store.risk).toMatchObject({ complete: true, tier: 'low', authors: null, attempts: 1 });
@@ -848,7 +849,7 @@ describe('the risk the server reads for a revision', () => {
 
   it('stops waiting for a read once the project has no policy', async () => {
     reviewed();
-    github.failing.files = 502;
+    github.failing.files = 422;
     await refresh(withPolicy(), { current: { headSha: head, baseRef: 'main' } });
     const due = Date.parse(store.risk.retryAt) + 1;
     expect(await sweep(plain, due)).toEqual([{ repo, prNumber: 7, published: false, skipped: 'no_policy' }]);
@@ -1400,7 +1401,7 @@ describe('a commit shared by several pull requests', () => {
   it('withholds success when the default-branch fallback cannot be read', async () => {
     trivial();
     github.pullsAt = () => [];
-    github.failing.openPulls = 503;
+    github.failing.openPulls = 422;
     await refresh(enforcing(), { current });
     expect(posted()).toEqual([]);
     expect(store.row.publishError).toContain('success');
@@ -1481,14 +1482,14 @@ describe('a commit shared by several pull requests', () => {
 
   it('writes no success while GitHub cannot say which pull requests are at the commit', async () => {
     trivial();
-    github.failing.siblings = 502;
+    github.failing.siblings = 422;
     const project = enforcing();
     await refresh(project, { current });
     expect(posted()).toEqual([]);
     for (const row of [store.row, store.readiness]) {
       expect(row).toMatchObject({ statusState: 'success', publishedSha: null, publishAttempts: 1 });
       expect(row.publishError).toMatch(
-        /other pull requests at aaaaaaa could not be read from GitHub \(GitHub answered 502.*so `success` was not written/,
+        /other pull requests at aaaaaaa could not be read from GitHub \(GitHub answered 422.*so `success` was not written/,
       );
       expect(row.publishRetryAt).toBeTruthy();
     }
@@ -1504,7 +1505,7 @@ describe('a commit shared by several pull requests', () => {
 
   it('still writes a status that does not pass when the others cannot be read', async () => {
     reviewed();
-    github.failing.siblings = 502;
+    github.failing.siblings = 422;
     await refresh(enforcing(), { current: { headSha: head, baseRef: 'main' } });
     // High risk, nobody approved: restrictive whatever the other pull requests say.
     expect(posted('briareus/approvals')).toEqual([
@@ -1677,7 +1678,7 @@ describe('approvals given on GitHub', () => {
     expect(store.readiness).toMatchObject({ valid: 2, result: 'satisfied' });
     // One approval is dismissed on GitHub; when the retry is due, the pull request read fails.
     github.reviews = [review(1, 'octo-reviewer'), review(2, 'mona-reviewer', 'DISMISSED')];
-    github.failing.pull = 502;
+    github.failing.pull = 422;
     await sweep(project, Date.parse(store.risk.retryAt) + 1);
     expect(asked('/reviews?')).toHaveLength(1);
     expect(store.risk.reviewsSyncedAt).toBeNull();
@@ -1693,7 +1694,7 @@ describe('approvals given on GitHub', () => {
     const fetch = globalThis.fetch;
     vi.stubGlobal(
       'fetch',
-      vi.fn((url, init) => (url.includes('/permission') ? Promise.resolve(answer(503)) : fetch(url, init))),
+      vi.fn((url, init) => (url.includes('/permission') ? Promise.resolve(answer(422)) : fetch(url, init))),
     );
     const result = await refresh(withPolicy({ acceptGithubApprovals: true }));
     expect(result.approvals.valid).toBe(0);
@@ -1714,7 +1715,7 @@ describe('approvals given on GitHub', () => {
   it('clears reviews-only retries once GitHub approvals are disabled', async () => {
     reviewed();
     const project = enforcing({ acceptGithubApprovals: true });
-    github.failing.reviews = 502;
+    github.failing.reviews = 422;
     await refresh(project, { current: { headSha: head, baseRef: 'main' } });
     const due = Date.parse(store.risk.retryAt) + 1;
     expect(store.risk).toMatchObject({ attempts: 1 });
@@ -1742,7 +1743,7 @@ describe('approvals given on GitHub', () => {
       github.reviews = [review(1, 'octo-reviewer'), review(2, 'mona-reviewer')];
       github.files = changed('README.md');
       if (failure === 'short file list') github.pull.changed_files = 5;
-      else github.failing.files = 502;
+      else github.failing.files = 422;
       const project = withPolicy({ acceptGithubApprovals: true });
       const given = await refresh(project, { current: { headSha: head, baseRef: 'main' } });
       expect(store.risk.error).toBeTruthy();
@@ -1823,7 +1824,7 @@ describe('approvals given on GitHub', () => {
     // A read that fails then is nobody's to wait for.
     store.approvals = [];
     store.risk = null;
-    github.failing.reviews = 502;
+    github.failing.reviews = 422;
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
     await refresh(project, {
       current: { headSha: head, baseRef: 'main' },
@@ -1837,7 +1838,7 @@ describe('approvals given on GitHub', () => {
   it('keep a failed read of the files waiting for its turn while the reviews are read', async () => {
     reviewed();
     github.reviews = [review(1, 'octo-reviewer')];
-    github.failing.files = 502;
+    github.failing.files = 422;
     const project = withPolicy({ acceptGithubApprovals: true });
     await refresh(project, { current: { headSha: head, baseRef: 'main' } });
     const { retryAt, error } = store.risk;
@@ -1858,7 +1859,7 @@ describe('approvals given on GitHub', () => {
   it('do not count while who wrote the head could not be read, however the retries end', async () => {
     reviewed();
     // The commits cannot be read; they would show octo-pair as a committer.
-    github.failing.commits = 502;
+    github.failing.commits = 422;
     github.commits = [
       { sha: 'c'.repeat(40), author: { login: 'octo-author' }, committer: { login: 'octo-pair' } },
     ];
@@ -1903,11 +1904,11 @@ describe('approvals given on GitHub', () => {
     await refresh(project, { current: { headSha: head, baseRef: 'main' } });
     expect(store.risk).toMatchObject({ complete: true, tier: 'low' });
     expect(posted('briareus/approvals').at(-1)).toMatchObject({ state: 'success' });
-    github.failing.reviews = 502;
+    github.failing.reviews = 422;
     await refresh(project);
     expect(store.risk).toMatchObject({ attempts: 1, complete: true, tier: 'low' });
     // The reviews answer again; the files would not, and are not asked.
-    github.failing = { files: 502 };
+    github.failing = { files: 422 };
     await sweep(project, Date.parse(store.risk.retryAt) + 1);
     expect(asked('/pulls/7/files')).toHaveLength(1);
     expect(store.risk).toMatchObject({
@@ -1944,7 +1945,7 @@ describe('approvals given on GitHub', () => {
     const project = withPolicy({ acceptGithubApprovals: true });
     await refresh(project, { current: { headSha: head, baseRef: 'main' } });
     expect(store.readiness).toMatchObject({ valid: 2, result: 'satisfied' });
-    github.failing.reviews = 502;
+    github.failing.reviews = 422;
     const outcome = await refresh(project);
     expect(outcome.approvals).toMatchObject({ valid: 0, result: 'pending' });
     expect(outcome.approvals.approvals.map((a) => a.reason)).toEqual([
@@ -2031,7 +2032,7 @@ describe('risk that makes the security pass required', () => {
   });
 
   it('requires it when the tier cannot be known before discovery', async () => {
-    github.failing.files = 502;
+    github.failing.files = 422;
     expect(
       await enforcement.reviewSecurityPolicy(advisory(), 7, { headSha: head, baseRef: 'main' }, { cfg }),
     ).toEqual({
