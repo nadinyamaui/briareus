@@ -2064,14 +2064,22 @@ describe('the label step held against the outcome', () => {
   });
 
   it('notes a check it could not make instead of passing over it', async () => {
-    github_({});
-    fetch.mockImplementation(async () => answer(502, {}));
-    expect(await check()).toEqual([
-      {
-        code: 'label_check_failed',
-        message:
-          'Briareus could not check the pull request’s labels and approvals against the outcome: GitHub answered 502 reading the pull request’s labels',
-      },
-    ]);
+    vi.useFakeTimers();
+    try {
+      github_({});
+      fetch.mockImplementation(async () => answer(502, {}));
+      const pending = check();
+      await vi.runAllTimersAsync();
+      expect(await pending).toEqual([
+        {
+          code: 'label_check_failed',
+          message:
+            'Briareus could not check the pull request’s labels and approvals against the outcome: GitHub answered 502 reading /repos/acme/shop/issues/7/labels?per_page=100 after 4 attempts',
+        },
+      ]);
+      expect(fetch).toHaveBeenCalledTimes(4);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

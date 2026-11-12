@@ -95,6 +95,184 @@ describe('githubRest', () => {
   });
 });
 
+describe('REST read retries', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1800000000000);
+  });
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it.each([502, 503, 504])('recovers from %s before returning the PR', async (status) => {
+    const { githubRest } = await freshGithub();
+    const failed = new Response('', { status });
+    const fetchMock = stubFetch(failed, reply({ body: { number: 12 } }));
+    const pending = githubRest(cfg, 'GET', '/repos/a/b/pulls/12');
+
+    await vi.runAllTimersAsync();
+
+    expect(await (await pending).json()).toEqual({ number: 12 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(failed.bodyUsed).toBe(true);
+  });
+
+  it.each([0, 1])('bounds exponential backoff with jitter at random=%s', async (random) => {
+    const { githubRest } = await freshGithub();
+    vi.spyOn(Math, 'random').mockReturnValue(random);
+    const times = [];
+    const fetchMock = vi.fn(async () => {
+      times.push(Date.now());
+      return reply({ status: 503 });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const pending = githubRest(cfg, 'GET', '/repos/a/b/pulls/12').catch((err) => err);
+
+    await vi.runAllTimersAsync();
+
+    expect(await pending).toMatchObject({
+      status: 503,
+      attempts: 4,
+      message: 'GitHub answered 503 reading /repos/a/b/pulls/12 after 4 attempts',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    const base = random === 0 ? 250 : 500;
+    expect(times.map((time) => time - times[0])).toEqual([0, base, base * 3, base * 7]);
+  });
+
+  it('recovers from a fetch network error', async () => {
+    const { githubRest } = await freshGithub();
+    const fetchMock = vi.fn().mockRejectedValueOnce(new TypeError('fetch failed')).mockResolvedValue(reply());
+    vi.stubGlobal('fetch', fetchMock);
+    const pending = githubRest(cfg, 'GET', '/repos/a/b');
+    await vi.runAllTimersAsync();
+    expect(await pending).toMatchObject({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports the attempt count when network failures persist', async () => {
+    const { githubRest } = await freshGithub();
+    const fetchMock = vi.fn().mockRejectedValue(new TypeError('fetch failed'));
+    vi.stubGlobal('fetch', fetchMock);
+    const pending = githubRest(cfg, 'GET', '/repos/a/b').catch((err) => err);
+    await vi.runAllTimersAsync();
+    expect(await pending).toMatchObject({ status: 502, attempts: 4 });
+    expect((await pending).message).toMatch(/fetch failed after 4 attempts$/);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it.each([401, 403, 404, 422])('returns a non-transient %s without retrying', async (status) => {
+    const { githubRest } = await freshGithub();
+    const fetchMock = stubFetch(reply({ status }));
+    expect(await githubRest(cfg, 'GET', '/repos/a/b')).toMatchObject({ status });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['POST', 'PATCH', 'PUT', 'DELETE'])('does not retry a %s write', async (method) => {
+    const { githubRest } = await freshGithub();
+    const fetchMock = stubFetch(reply({ status: 503 }));
+    expect(await githubRest(cfg, method, '/repos/a/b')).toMatchObject({ status: 503 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    fetchMock.mockRejectedValueOnce(new TypeError('fetch failed'));
+    await expect(githubRest(cfg, method, '/repos/a/b')).rejects.toThrow('fetch failed');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([403, 429])('waits for Retry-After on a secondary limit (%s)', async (status) => {
+    const { githubRest } = await freshGithub();
+    const fetchMock = stubFetch(reply({ status, headers: { 'retry-after': '1' } }), reply());
+    const pending = githubRest(cfg, 'GET', '/repos/a/b');
+    await vi.advanceTimersByTimeAsync(5999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await pending).toMatchObject({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('accepts an HTTP-date Retry-After without retrying before it', async () => {
+    const { githubRest } = await freshGithub();
+    const fetchMock = stubFetch(
+      reply({ status: 403, headers: { 'retry-after': new Date(Date.now() + 1000).toUTCString() } }),
+      reply(),
+    );
+    const pending = githubRest(cfg, 'HEAD', '/repos/a/b');
+    await vi.advanceTimersByTimeAsync(5999);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await pending).toMatchObject({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails promptly and preserves cooldown metadata when Retry-After exceeds the budget', async () => {
+    const { githubRest } = await freshGithub();
+    const fetchMock = stubFetch(reply({ status: 429, headers: { 'retry-after': '60' } }));
+    await expect(githubRest(cfg, 'GET', '/repos/a/b')).rejects.toMatchObject({
+      status: 429,
+      rateLimited: true,
+      retryAt: Date.now() + 65000,
+      attempts: 1,
+      message: expect.stringMatching(/after 1 attempt$/),
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps conditional headers and cached JSON across a 503 followed by a 304', async () => {
+    const { githubRest } = await freshGithub();
+    const fetchMock = stubFetch(
+      reply({ headers: { etag: 'version-1' }, body: { number: 12 } }),
+      reply({ status: 503 }),
+      reply({ status: 304 }),
+    );
+    const read = () => githubRest(cfg, 'GET', '/repos/a/b/pulls/12', undefined, { conditional: true });
+    await read();
+    const pending = read();
+    await vi.runAllTimersAsync();
+    const response = await pending;
+    expect(response.notModified).toBe(true);
+    expect(await response.json()).toEqual({ number: 12 });
+    expect(fetchMock.calls.slice(1).map((call) => call.init.headers['If-None-Match'])).toEqual([
+      'version-1',
+      'version-1',
+    ]);
+  });
+
+  it('cancels during backoff without another fetch', async () => {
+    const { githubRest } = await freshGithub();
+    const controller = new AbortController();
+    const fetchMock = stubFetch(reply({ status: 503 }));
+    const pending = githubRest(cfg, 'GET', '/repos/a/b', undefined, { signal: controller.signal }).catch(
+      (err) => err,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    controller.abort();
+    await vi.runAllTimersAsync();
+    expect(await pending).toBe(controller.signal.reason);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('bounds even an unresponsive fetch to the total 25-second read budget', async () => {
+    const { githubRest } = await freshGithub();
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new DOMException('Read timed out', 'TimeoutError')), ms);
+      return controller.signal;
+    });
+    const fetchMock = vi.fn(
+      (_url, { signal }) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const pending = githubRest(cfg, 'GET', '/repos/a/b').catch((err) => err);
+    await vi.advanceTimersByTimeAsync(25000);
+    expect(await pending).toMatchObject({
+      attempts: 1,
+      message: expect.stringMatching(/Read timed out after 1 attempt$/),
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('rate limiting', () => {
   it('lets a plain 403 through: a missing scope is not a rate limit', async () => {
     const { githubRest } = await freshGithub();
@@ -130,9 +308,11 @@ describe('rate limiting', () => {
       caught = e;
     }
 
-    expect(caught.message).toMatch(/backing off until \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(caught.message).toMatch(
+      /backing off until \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z after 1 attempt$/,
+    );
     expect(caught.resource).toBe('core');
-    const spelled = new Date(caught.message.split('backing off until ')[1]).getTime();
+    const spelled = new Date(caught.message.split('backing off until ')[1].split(' after ')[0]).getTime();
     expect(spelled).toBeGreaterThanOrEqual(before + retryAfterSeconds * 1000);
   });
 
@@ -177,11 +357,11 @@ describe('rate limiting', () => {
 
   it('lets calls through again once the cooldown has passed', async () => {
     const { githubRest } = await freshGithub();
-    stubFetch(reply({ status: 429, headers: { 'retry-after': '1' } }), reply());
+    stubFetch(reply({ status: 429, headers: { 'retry-after': '60' } }), reply());
 
     await expect(githubRest(cfg, 'GET', '/repos/a/b')).rejects.toThrow(/rate limit/);
     // The cooldown is the reset plus a 5s margin, so the clock has to move past both.
-    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 60000);
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 70000);
 
     await expect(githubRest(cfg, 'GET', '/repos/a/b')).resolves.toMatchObject({ ok: true });
   });
