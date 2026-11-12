@@ -409,6 +409,19 @@ restrictive of theirs, named after the pull request it is of, and
 alone is a `review-approval` item in `GET /attention`. See
 [Risk-based human approvals](features.md#risk-based-human-approvals).
 
+The review benchmark measures the review against curated changes whose answers
+people adjudicated beforehand, in a project with `reviewBenchmark` on: cases
+(`/review-benchmarks/cases`, with their answers, readable with a manage token
+only), runs that put the adjudicated ones through the real review on throwaway
+pull requests (`POST /review-benchmarks/runs`), a result per case with its score
+against the answer, judgments of findings
+(`PUT /review-benchmarks/runs/{runId}/results/{resultId}/judgments/{findingId}`)
+and a comparison of two runs (`GET /review-benchmarks/compare`). A review that did
+not complete is no result, never a pass. `GET /review-quality` summarizes a
+project's reviews from what the server keeps: verdicts and who gave them, rounds,
+repeats, cost with its caveats, and how long reviews waited on people. See
+[Review benchmark and quality](features.md#review-benchmark-and-quality).
+
 ## Pull request data
 
 To bring a PR branch up to date with its base, call

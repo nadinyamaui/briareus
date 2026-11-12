@@ -54,6 +54,10 @@ import {
   setApprovalDirectory,
 } from './lib/review-enforcement.js';
 import { approvalRoutes } from './lib/approval-routes.js';
+import { createBenchmarkStore } from './lib/review-benchmark-store.js';
+import { createBenchmarkRunner } from './lib/review-benchmark-runner.js';
+import { reviewBenchmarkRoutes } from './lib/review-benchmark-routes.js';
+import { readReviewQualityRows } from './lib/review-quality.js';
 import { openedPull } from './lib/review-approvals.js';
 import { createGithubLinks } from './lib/github-links.js';
 import { readPullRevision } from './lib/review-revision.js';
@@ -88,7 +92,8 @@ import {
   watchBrowser,
 } from './lib/browser.js';
 import fs from 'fs';
-import { execFile, spawn } from 'child_process';
+import { execFile, execFileSync, spawn } from 'child_process';
+import { createHash } from 'crypto';
 import { getConfig } from './lib/config.js';
 import { maintenanceState } from './lib/recovery.js';
 import { workerTranscript } from './lib/worker-transcript.js';
@@ -120,6 +125,7 @@ import {
   listCodeReviewCommitOwners,
   addCodeReviewApproval,
   withdrawCodeReviewApproval,
+  githubStoreConnection,
 } from './lib/db.js';
 import {
   initJobs,
@@ -189,6 +195,7 @@ import {
   setOwnerGithub,
   setInboxOwner,
   DEV_OPEN,
+  closeDevSessionWithReason,
 } from './lib/jobs.js';
 import {
   getBinary,
@@ -224,6 +231,7 @@ import {
   providerDefaultEffort,
   providerGroups,
   runtimeCatalog,
+  resolveRuntime,
 } from './lib/providerstore.js';
 import {
   providerUsage,
@@ -269,7 +277,13 @@ import {
   removeMemory,
   removeMemoryByName,
 } from './lib/memories.js';
-import { initTemplates, globalTemplates, saveGlobalTemplates, templateCatalog } from './lib/templates.js';
+import {
+  initTemplates,
+  globalTemplates,
+  saveGlobalTemplates,
+  templateCatalog,
+  templateText,
+} from './lib/templates.js';
 import { closeIssue, projectIssues, projectPulls, pullOverview, updateGithubItem } from './lib/prboard.js';
 import {
   commitView,
@@ -924,6 +938,100 @@ api.use(
     accountsOf: (user) => accountsOf(user.id),
     openedPull: (user, repo, prNumber) =>
       openedPull(devSessionRecords(), { userId: user.id, repo, prNumber }),
+  }),
+);
+// The review benchmark: curated cases with adjudicated answers, put through the real
+// code review on throwaway pull requests of a project set aside for it, and scored
+// (lib/review-benchmark.js). Reached through /api/v1 only, as the user the token
+// belongs to; the answers never reach an agent session.
+const benchmarkStore = createBenchmarkStore();
+// The commit this server runs, recorded with a run so two runs of different code can be
+// told apart. Read once: a deploy restarts the server.
+const coreRevision = (() => {
+  try {
+    return (
+      execFileSync('git', ['rev-parse', 'HEAD'], { cwd: import.meta.dirname, encoding: 'utf8' }).trim() ||
+      null
+    );
+  } catch {
+    return null;
+  }
+})();
+const benchmarkRunner = createBenchmarkRunner({
+  store: benchmarkStore,
+  github: (method, path, body) => githubRest(getConfig(), method, path, body),
+  getProject,
+  // Started as a person's own review is (POST /actions), on the project's review
+  // runtime, by the person who started the run.
+  startReview: async ({ project, prNumber, ownerId }) => {
+    const cfg = getConfig();
+    const lookup = await githubRest(cfg, 'GET', `/repos/${project.repo}/pulls/${prNumber}`);
+    if (!lookup.ok) throw new Error(`GitHub answered ${lookup.status} reading pull request #${prNumber}`);
+    const pr = await lookup.json();
+    const runtime = resolveRuntime(actionRuntime(project), cfg);
+    if (!runtime) throw new Error(`No review runtime is available for ${project.repo}`);
+    const reviewRequest = await admitUserReview({ project, prNumber, pr, ownerId });
+    const spec = await actionSessionSpec(getAction('review'), {
+      repo: project.repo,
+      prNumber,
+      branch: pr.head?.ref,
+      baseBranch: pr.base?.ref || '',
+      title: pr.title || '',
+      project,
+      input: '',
+    });
+    const session = createDevSession({
+      provider: runtime.provider.id,
+      model: runtime.model,
+      effort: runtime.effort,
+      ...spec,
+      ownerId,
+      reviewRequest,
+    });
+    return { jobId: session.id };
+  },
+  findReview: async (repo, prNumber, jobId = null) => {
+    const reviews = await listPullCodeReviews(repo, prNumber, 20);
+    return jobId ? reviews.find((r) => r.jobId === jobId) || null : reviews[0] || null;
+  },
+  readOutcome: readReviewOutcome,
+  closeSession: (jobId, why) => closeDevSessionWithReason(jobId, why),
+});
+api.use(
+  reviewBenchmarkRoutes({
+    getProject,
+    store: benchmarkStore,
+    runner: benchmarkRunner,
+    runSettings: (project) => {
+      const configured = actionRuntime(project);
+      const runtime = resolveRuntime(configured, getConfig());
+      if (!runtime)
+        throw Object.assign(
+          new Error(
+            `No review runtime is available for ${project.repo}: choose an action provider in Settings > Projects first`,
+          ),
+          { status: 409, code: 'runtime_unavailable' },
+        );
+      return {
+        runtime: {
+          providerId: runtime.provider.id,
+          provider: runtime.provider.label,
+          model: runtime.model,
+          effort: runtime.effort,
+          replaced: runtime.replaced ? runtime.replaced.label : null,
+        },
+        configuration: {
+          coreRevision,
+          securityReview: project.securityReview || 'off',
+          enforceReviewOutcome: project.enforceReviewOutcome === true,
+          reviewLabels: createHash('sha256')
+            .update(templateText('reviewLabels', project))
+            .digest('hex')
+            .slice(0, 16),
+        },
+      };
+    },
+    qualityRows: (repo, window) => readReviewQualityRows(githubStoreConnection, repo, window),
   }),
 );
 api.use(
@@ -2580,6 +2688,12 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
       }).catch((e) => console.error('Could not sweep code review statuses:', e.message));
     sweepReviewStatuses();
     setInterval(sweepReviewStatuses, 60_000).unref();
+    // Benchmark runs move on by themselves, and one the server stopped in the middle of
+    // is picked up where its records say it was.
+    const benchmarkTick = () =>
+      benchmarkRunner.tick().catch((e) => console.error('Could not advance benchmark runs:', e.message));
+    benchmarkTick();
+    setInterval(benchmarkTick, 30_000).unref();
     databaseBackups.start();
     sshResourceMonitor.start();
     githubSync.start();
