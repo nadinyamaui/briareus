@@ -77,9 +77,8 @@ Each QA run posts its own sheet tagged with a run identity (run id, PR, head and
 earlier sheets as history. Verdicts read only that run's sheet once it is marked executed and its head
 and base branch still match the live PR. Missing or stale execution is incomplete,
 while actual current-run failures still stop the loop for human judgment.
-With `babysitPrs` enabled, conflict resolution, CI fixes and recommended code reviews run every 15 minutes,
-using the project's action runtime and respecting author filters and retry limits. Reviews of one pull
-request are bounded by the project's `reviewRoundLimit` (see [Review rounds](#review-rounds)).
+Reviews of one pull request are bounded by the project's `reviewRoundLimit` (see
+[Review rounds](#review-rounds)).
 
 Each code review session is recorded in the `code_reviews` table: its PR,
 branch, the reviewed head, its provider, model and effort, its tokens and cost
@@ -280,13 +279,13 @@ failed review never marks any other round. A round still marked running that no
 session is running any more (its settling write was lost) is recorded as failed
 when the next round on the pull request is claimed.
 
-**Who asked.** The PR babysitter and an orchestrator's `start_pr_action` are
-automation; a review started through `POST /api/v1/actions` or a person's typed
+**Who asked.** An orchestrator's `start_pr_action` is automation (as were
+rounds the retired PR babysitter started, stored with source `babysitter`); a review started through `POST /api/v1/actions` or a person's typed
 `/review` is that person's request, even in an automation-created session.
 Every round counts, whoever asked. The difference is in what each may
 do at the limit and with a head that was already reviewed:
 
-| Request                         | Babysitter, orchestrator     | Person (`POST /actions`)        |
+| Request                         | Orchestrator                 | Person (`POST /actions`)        |
 | ------------------------------- | ---------------------------- | ------------------------------- |
 | New revision, rounds left       | Starts                       | Starts                          |
 | New revision, limit used        | Refused                      | Refused unless `continueReview` |
@@ -301,10 +300,6 @@ Optional or Dismissed without the evidence the [review outcome](#review-outcome)
 asks of such a verdict) is listed for a person to judge. The refusal says so and
 how to go on:
 
-- The babysitter is refused before any session starts. It remembers the answer
-  for that head and that limit, so it asks once per push, not every 15 minutes,
-  and asks again when the project's limit changes. Conflict and CI errands on
-  the same pull request carry on.
 - An orchestrator's `start_pr_action` answers 409 with the reason and what to
   tell its user. An agent has no way to continue past the limit.
 - A plain `POST /api/v1/actions` review answers 409 with
@@ -504,13 +499,13 @@ is computed from, and reads `pending`), when its execution settles, when a
 client changes a finding or rules on a decision through the API, when a review
 request is refused at the round limit, and when the server sees the pull request
 at another head or base branch than the outcome is for: in a `pull_request`
-webhook, in a session's sync of its pull request, or in the babysitter's pass
-over the board. That last one is what makes a retarget count, which moves no
+webhook or in a session's sync of its pull request. That is what makes a
+retarget count, which moves no
 commit: a pull request reviewed against `main` and retargeted to `release`
 keeps its head, and the `success` on it, until the outcome is computed again
 and `pending` is posted on that same commit. Nothing polls for it; a
-repository with no webhook, no session on the pull request and no babysitter
-is seen at its next review.
+repository with no webhook and no session on the pull request is seen at its
+next review.
 
 It is stored per pull request in `code_review_outcomes`, beside what GitHub was
 last told, and every read computes it again from the stored records, so an
@@ -655,7 +650,7 @@ be told from the step's own and is dismissed with it when the outcome does not
 pass, which matters where reviews post as their owner's own GitHub account; a
 thread resolved on GitHub without a new review is not seen until the next
 review reads the threads; a retarget or push is only seen through a webhook, a
-session or the babysitter; a review whose session vanished without being
+session; a review whose session vanished without being
 settled stays `running` and so `pending`; the pull request board still
 recommends actions from labels alone; and the server cannot judge the quality
 of evidence, only that it was recorded. The status write and read-back, the

@@ -100,10 +100,14 @@ export async function up({ context: p }) {
   }
   // How many review rounds a pull request of the project gets before a person has to
   // continue it; 0 switches the limit off (rounds are still counted).
-  if (!(await hasColumn(p, 'projects', 'review_round_limit')))
+  // Beside babysit_prs while it exists; it went later (2026_11_12_120000), and a down and
+  // up after that adds the column at the end.
+  if (!(await hasColumn(p, 'projects', 'review_round_limit'))) {
+    const after = (await hasColumn(p, 'projects', 'babysit_prs')) ? ' AFTER `babysit_prs`' : '';
     await p.query(
-      'ALTER TABLE `projects` ADD COLUMN `review_round_limit` TINYINT UNSIGNED NOT NULL DEFAULT 3 AFTER `babysit_prs`',
+      `ALTER TABLE \`projects\` ADD COLUMN \`review_round_limit\` TINYINT UNSIGNED NOT NULL DEFAULT 3${after}`,
     );
+  }
 }
 
 /** @param {{ context: import('mysql2/promise').Pool }} ctx */
