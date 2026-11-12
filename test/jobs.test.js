@@ -452,7 +452,6 @@ import {
   setOwnerGithub,
   setSessionProjectFilter,
   stepProvider,
-  pullRequestHasOpenSession,
   dropQueuedMessage,
   cancelDevTurn,
   closeDevSessionWithReason,
@@ -1021,67 +1020,6 @@ describe('stepProvider', () => {
 describe('getJob', () => {
   it('answers null for an id nothing created', () => {
     expect(getJob('never-created')).toBeNull();
-  });
-});
-
-describe('pullRequestHasOpenSession', () => {
-  const openIds = ['bs-number', 'bs-synced', 'bs-borrowed', 'bs-own-branch', 'bs-preparing'];
-  // Own repo and PR numbers, so the rows restored here match nothing the other blocks sync.
-  const row = (id, over) => ({
-    id,
-    kind: 'devchat',
-    status: 'closed',
-    repo: 'acme/babysit',
-    turns: 1,
-    ...over,
-  });
-
-  beforeAll(async () => {
-    state.stored = [
-      row('bs-number', { branch: 'dev-x', startedOnPr: 211 }),
-      row('bs-synced', { branch: 'dev-y', prStatus: { number: 212, state: 'open' } }),
-      row('bs-borrowed', { branch: 'dev-z', prBranch: 'feature/213' }),
-      row('bs-own-branch', { branch: 'feature/214' }),
-      row('bs-preparing', { branch: null, startBranch: 'feature/216' }),
-      row('bs-closed', { branch: 'feature/215', startedOnPr: 215 }),
-    ];
-    await initJobs();
-    for (const id of openIds) getJob(id).status = 'idle';
-  });
-
-  // Retire fixtures so later poll ticks cannot discover their branches under another test's mocks.
-  afterAll(() => {
-    for (const id of openIds) getJob(id).status = 'closed';
-  });
-
-  it('finds an open session by the pull request it was started on or synced to', () => {
-    expect(pullRequestHasOpenSession('acme/babysit', 211, 'feature/211')).toBe(true);
-    expect(pullRequestHasOpenSession('ACME/Babysit', 212, 'feature/212')).toBe(true);
-  });
-
-  it('finds one by the branch it is filed under or checked out on', () => {
-    expect(pullRequestHasOpenSession('acme/babysit', 213, 'feature/213')).toBe(true);
-    expect(pullRequestHasOpenSession('acme/babysit', 214, 'feature/214')).toBe(true);
-  });
-
-  it('finds one still preparing on the branch it was started on', () => {
-    expect(pullRequestHasOpenSession('acme/babysit', 216, 'feature/216')).toBe(true);
-  });
-
-  it('ignores closed sessions, other repositories and a missing branch', () => {
-    expect(pullRequestHasOpenSession('acme/babysit', 215, 'feature/215')).toBe(false);
-    expect(pullRequestHasOpenSession('acme/other', 211, 'feature/213')).toBe(false);
-    expect(pullRequestHasOpenSession('acme/babysit', 299, '')).toBe(false);
-  });
-
-  it('counts only sessions with a turn under way when asked for busy ones', () => {
-    expect(pullRequestHasOpenSession('acme/babysit', 211, 'feature/211', { busyOnly: true })).toBe(false);
-    getJob('bs-number').status = 'running';
-    try {
-      expect(pullRequestHasOpenSession('acme/babysit', 211, 'feature/211', { busyOnly: true })).toBe(true);
-    } finally {
-      getJob('bs-number').status = 'idle';
-    }
   });
 });
 
@@ -12489,14 +12427,16 @@ describe('a worker that cut a stacked branch off the one it was spawned on, mid-
     expect(askedAbout('dev-upper-a')).toBe(true);
   });
 
-  it('leaves the lower PR to the babysitter once it is on a branch of its own', () => {
+  it('lets go of the lower PR once it is on a branch of its own', () => {
     const moved = getJob('stk-mid-babysat');
+    const stayed = getJob('stk-mid-babysitter-on');
     checkout(moved, 'dev-upper-b');
-    expect(pullRequestHasOpenSession(repo, 22, 'dev-lower-b')).toBe(false);
+    checkout(stayed, 'dev-lower-b');
+    githubWith({ 'dev-lower-b': 22 });
+    // A push to the lower branch reaches only the session whose tree is still on it.
+    expect(syncSessionsOn(repo, 'dev-lower-b')).toBe(1);
     expect(moved).toMatchObject({ branch: 'dev-upper-b', prStatus: null });
-    // A session whose tree is on the branch still has it.
-    checkout(getJob('stk-mid-babysitter-on'), 'dev-lower-b');
-    expect(pullRequestHasOpenSession(repo, 22, 'dev-lower-b')).toBe(true);
+    expect(stayed.branch).toBe('dev-lower-b');
   });
 
   it('keeps the lower PR from a session on its branch only while busy on that branch', async () => {
@@ -21264,7 +21204,6 @@ describe('a worker spawned to stack on another branch', () => {
     );
     // Nothing looked up, attached or held the lower branch's PR.
     expect(githubRest.mock.calls.some(([, , route]) => String(route).includes('dev-lower'))).toBe(false);
-    expect(pullRequestHasOpenSession('acme/stack', 12, 'dev-lower')).toBe(false);
     expect(workerSummary(worker)).toMatchObject({ branch: own, stackOn: 'dev-lower', pr: null });
     // start_pr_action on the lower PR gets past the open-session check while the worker
     // runs: what refuses it here is the missing action runtime, and nothing is started.

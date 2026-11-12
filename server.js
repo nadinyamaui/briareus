@@ -281,7 +281,6 @@ import { agentOnly, apiEnabled } from './lib/auth.js';
 import { webhookRouter, installRepoWebhooks } from './lib/webhooks.js';
 import { githubSync } from './lib/github-sync.js';
 import { localUpdater } from './lib/local-update.js';
-import { createBabysitter } from './lib/babysitter.js';
 import { securityHeaders } from './lib/security.js';
 import { listWorkspaces, resetSetup, cleanWorkspace, startWorkspacePruner } from './lib/workspaces.js';
 import { githubWebhookUrl, sessionWebhookKey, sessionWebhookUrl } from './lib/webhooksecrets.js';
@@ -2445,8 +2444,6 @@ const port = portFlag !== -1 ? Number(process.argv[portFlag + 1]) : cfg.port;
   const server = app.listen(port, cfg.bindHost, () => {
     resumeRestartedSessions();
     sessionStats.start();
-    // Projects with `babysitPrs` get their pull requests' errands started every 15 minutes.
-    createBabysitter().startTimer();
     // What a code review outcome still owes GitHub is paid here: a status GitHub did
     // not take, once its backoff is due, and one never sent or an outcome never computed
     // again because the server stopped first, which is why this also runs now, at boot.

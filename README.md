@@ -234,13 +234,6 @@ configured server; Briareus does not invent a database template or infrastructur
 When the review finishes, its session is automatically deleted and its workspace
 and database are released; the stored review and the PR comments remain.
 
-With `babysitPrs` enabled, the server checks open PRs every 15 minutes and starts
-conflict resolution, CI fixes, or a code review when the board recommends one
-(no labels yet, `requires-dev-review` or `feedback-implemented`). Each action is
-deduplicated by head commit, with a cap on repeated pushes; reviews push nothing,
-so they also run on PRs by other authors, at most three per project each round. It skips drafts, forks, blocked PRs, and
-occupied sessions.
-
 Reviewing one pull request again and again is bounded: each review of a new
 revision is a round, and a project allows `reviewRoundLimit` of them per pull
 request (3 by default, 0 for no limit), counted across all its commits. The

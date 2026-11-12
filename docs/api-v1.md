@@ -135,7 +135,8 @@ deleted, answers any user for the tasks they may see and 404 otherwise.
 
 A session belongs to the user who started it (`ownerId`). A loop's review,
 QA run and fix, and an orchestrator's workers, belong to the owner of the
-session they were started for; the babysitter's errands belong to nobody. An
+session they were started for; sessions with no owner (such as the retired PR
+babysitter's) belong to nobody. An
 admin sees every session; a member sees their own and the ownerless ones of
 projects shared with them, in `/sessions`, `/events`, the stats routes and
 every session route (another user's session answers 404).
@@ -347,18 +348,12 @@ available through guarded tools in opted-in interactive sessions. These
 tools are internal session APIs, separate from the client mail routes.
 See [mailbox setup](../README.md#mail) and [email from a session](email-mcp.md).
 
-## Babysitting pull requests
+## Review rounds per pull request
 
-`babysitPrs` enables periodic conflict resolution, CI fixes and code reviews on open
-pull requests. A review starts when the board recommends one, at most once per head
-commit and at most three per project each round. The project’s action runtime is required, and must be Claude or Codex for
-reviews. Author filters (for errands that push), head-commit deduplication, capacity
-limits and the repeated-push cap still apply; no feedback agents run.
-
-Reviews are also bounded per pull request. Every review of a new revision uses one
+Reviews are bounded per pull request. Every review of a new revision uses one
 of the project’s `reviewRoundLimit` rounds (3 by default, 0 for no limit), counted
 across all the pull request’s commits and never reset by a push. Once they are used,
-the babysitter and orchestrator sessions start no further review, and
+orchestrator sessions start no further review, and
 `POST /actions` with `action: "review"` answers 409 with
 `{ error, code: "review_round_limit", reviewRounds }`. Reaching the limit labels and
 approves nothing and is not a passed review. A person continues deliberately by

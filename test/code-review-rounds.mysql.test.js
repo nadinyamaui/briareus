@@ -107,7 +107,9 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review rounds on My
       REVIEW_COLUMNS,
     );
     const projects = await columns('projects');
-    expect(projects[projects.indexOf('babysit_prs') + 1]).toBe('review_round_limit');
+    // babysit_prs, which it was added beside, was dropped later (2026_11_12_120000).
+    expect(projects).toContain('review_round_limit');
+    expect(projects).not.toContain('babysit_prs');
     await up({ context: pool });
     await up({ context: pool });
     expect(await columns('code_reviews')).toEqual(reviews);
