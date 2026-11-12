@@ -281,6 +281,30 @@ describe('the benchmark runner', () => {
     expect((await store.getRun(null, 1)).results[0].review.outcome).toBeNull();
   });
 
+  it('reads the outcome of an ended review again when reading it failed', async () => {
+    store.add({ id: 1 }, [caseOf('one')]);
+    let reading = false;
+    const r = runner({
+      readOutcome: async (_p, prNumber) => {
+        if (!reading) throw new Error('read ETIMEDOUT');
+        return outcomeOf(prNumber);
+      },
+    });
+    await r.tick();
+    reviews.get(100).status = 'completed';
+    await r.tick();
+    expect((await store.getRun(null, 1)).results[0]).toMatchObject({
+      state: 'reviewing',
+      error: 'read ETIMEDOUT',
+      review: null,
+    });
+    reading = true;
+    await r.tick();
+    const result = (await store.getRun(null, 1)).results[0];
+    expect(result.state).toBe('done');
+    expect(result.review.outcome).toMatchObject({ outcome: 'changes_required' });
+  });
+
   it('picks up after a restart without a second pull request or a second review', async () => {
     store.add({ id: 1 }, [caseOf('one')]);
     // The previous process made the branches, the pull request and the review, and
@@ -316,6 +340,35 @@ describe('the benchmark runner', () => {
     expect(gh.refs.has('review/1-base')).toBe(false);
     expect(gh.refs.get('review/1')).toBe(sha('f'));
     expect(result.headBranch).toBeNull();
+  });
+
+  it('tries again when its branch exists but could not be looked up', async () => {
+    store.add({ id: 1 }, [caseOf('one')]);
+    // An earlier attempt made the base branch; this one is told so, then the lookup fails.
+    Object.assign(store.runs.get(1).results[0], {
+      state: 'opening',
+      headBranch: 'review/9',
+      baseBranch: 'review/9-base',
+      startedAt: clock,
+    });
+    gh.refs.set('review/9-base', sha('a'));
+    const github = gh.github;
+    let lookupFails = true;
+    const r = runner({
+      github: async (method, path, body) => {
+        if (method === 'GET' && path.includes('/git/ref/heads/') && lookupFails) {
+          lookupFails = false;
+          return { ok: false, status: 502, json: async () => ({ message: 'Bad gateway' }) };
+        }
+        return github(method, path, body);
+      },
+    });
+    await r.tick();
+    const first = (await store.getRun(null, 1)).results[0];
+    expect(first.state).toBe('opening');
+    expect(first.error).toContain('502');
+    await r.tick();
+    expect((await store.getRun(null, 1)).results[0]).toMatchObject({ state: 'reviewing', error: null });
   });
 
   it('tries a passing GitHub failure again on the next tick', async () => {

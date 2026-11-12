@@ -1339,9 +1339,11 @@ there and closes them again, so it is refused on any other project.
   within 3 lines), which stays `provisional` until somebody judges it
   (`PUT …/judgments/{findingId}`: `matches` a defect, `false_positive`,
   or `valid_unlisted`, a real problem the answer misses; with `harmfulFix` when
-  the fix it suggests would do harm). A defect is `caught` when a finding about
-  it was ruled a required fix, `caught_nonblocking` when only Optional,
-  `dismissed` when verification refuted it, else `missed`; a required fix that
+  the fix it suggests would do harm). A defect is `caught` when the finding
+  that stands for it (one a person matched to it, if any, before a location
+  match; then the strongest verdict) was ruled a required fix,
+  `caught_nonblocking` when only Optional, `dismissed` when verification
+  refuted it, else `missed`; a required fix that
   matches no defect is a false positive, and a second finding about a defect a
   duplicate. The summary gives recall (blocking, and with any verdict), blocking
   precision, false positives, harmful fixes, duplicates, outcomes against the

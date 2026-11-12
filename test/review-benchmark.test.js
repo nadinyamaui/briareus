@@ -276,6 +276,22 @@ describe('scoreResult', () => {
     });
   });
 
+  it('lets a finding a person matched to a defect stand for it over a stronger location guess', () => {
+    const s = scoreResult({
+      answer,
+      review: review([
+        finding({ id: 1, shouldFix: 'dismiss' }),
+        finding({ id: 2, shouldFix: 'fix', startLine: 42 }),
+      ]),
+      judgments: [{ findingId: 1, assessment: 'matches', defectId: 'd1' }],
+    });
+    expect(s.findings.map((f) => [f.id, f.class, f.basis])).toEqual([
+      [1, 'wrongly_dismissed', 'judgment'],
+      [2, 'duplicate', 'location'],
+    ]);
+    expect(s.defects.map((d) => [d.id, d.status])).toEqual([['d1', 'dismissed']]);
+  });
+
   it('takes judgments of findings outside the answer, and harmful fixes from them alone', () => {
     const s = scoreResult({
       answer: clean,
