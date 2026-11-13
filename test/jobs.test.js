@@ -2307,6 +2307,7 @@ describe('Claude private self-review', () => {
         const said = job.events.map((e) => String(e.text || ''));
         if (!privately) {
           expect(job.codeReviewPrivate).toBeUndefined();
+          expect(beginCodeReviewStages.mock.calls.at(-1)[1]).toMatchObject({ privately: false });
           expect(publish.prompt).toContain('Create a single comment in the PR with this format');
           expect(publish.prompt).toContain(`<!-- reviewer:code-review ${head} -->`);
           expect(verify.prompt).toContain('Start every reply with the verdict in bold');
@@ -2316,6 +2317,8 @@ describe('Claude private self-review', () => {
           return;
         }
         expect(job.codeReviewPrivate).toEqual({ head });
+        // Kept with the review, for the commit status computed from it later.
+        expect(beginCodeReviewStages.mock.calls.at(-1)[1]).toMatchObject({ privately: true });
         expect(said).toContain(
           'Private self-review: this project keeps the review of its own pull requests off GitHub, so the findings are registered and verified here and nothing is posted until none is left to fix.',
         );
@@ -3495,6 +3498,8 @@ describe('native Codex code review', () => {
         stages: STAGES,
         // The pull request the checkout was verified against, for a row that has none.
         prNumber: 77,
+        // An ordinary review, not a private self-review.
+        privately: false,
       });
       // From here this review is the one the pull request's outcome is computed from.
       expect(refreshCodeReviewOutcome.mock.calls[0].slice(0, 3)).toEqual(['acme/shop', 77, { reviewId: 5 }]);
@@ -4163,6 +4168,7 @@ describe('native Codex code review', () => {
         baseRef,
         stages: ['discover', 'security', 'publish', 'delegation', 'verify', 'label'],
         prNumber: 77,
+        privately: false,
       });
       // Decided when discovery started, kept for a restart, and not part of what a client reads.
       expect(job.codeReviewSecurity).toEqual({ head, policy: 'required' });

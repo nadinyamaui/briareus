@@ -575,6 +575,18 @@ describe('the commit status', () => {
     expect(posted()).toEqual([expect.objectContaining({ sha: head, state })]);
   });
 
+  // A private self-review's findings are not on GitHub, and the status must not quote them.
+  it('says nothing a private self-review’s reasons quote', async () => {
+    reviewed();
+    store.review.privateSelfReview = true;
+    store.findings = [finding({ shouldFix: null, title: 'SQL injection in login handler' })];
+    const { outcome } = await refresh(on);
+    expect(outcome.outcome).toBe('incomplete');
+    expect(outcome.status.description).toBe('Review incomplete at aaaaaaa: 1 reason, kept private');
+    expect(requests.at(-1).body.description).toBe('Review incomplete at aaaaaaa: 1 reason, kept private');
+    expect(JSON.stringify(requests)).not.toContain('SQL injection');
+  });
+
   it('goes out under the server’s token when a client’s request led to it', async () => {
     reviewed();
     await github.asGithubUser('a-users-own-token', () => refresh(on));

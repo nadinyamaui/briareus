@@ -280,6 +280,19 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review outcomes on 
       'label',
     ]);
     expect(listed.baseRef).toBe('main');
+    // An ordinary review unless its discovery decided otherwise, and kept until the next one.
+    expect(listed.privateSelfReview).toBe(false);
+    const own = await started(70, 'a');
+    expect(await getCodeReviewByJob(own.jobId)).toMatchObject({ privateSelfReview: false });
+    await beginCodeReviewStages(own.jobId, {
+      headSha: sha('a'),
+      baseRef: 'main',
+      stages: STAGES,
+      privately: true,
+    });
+    expect(await getCodeReviewByJob(own.jobId)).toMatchObject({ privateSelfReview: true });
+    await beginCodeReviewStages(own.jobId, { headSha: sha('a'), baseRef: 'main', stages: STAGES });
+    expect(await getCodeReviewByJob(own.jobId)).toMatchObject({ privateSelfReview: false });
   });
 
   it('records a stage only for the head the review holds, and keeps when it first started', async () => {

@@ -958,8 +958,16 @@ claim, file and line, and the review's evidence) as data. It checks them like
 any other feedback, keeps them out of every comment it posts, and does not add
 `feedback-implemented` for them alone.
 
+**The commit status.** A review keeps whether it ran as a private self-review
+(`code_reviews.private_self_review`), so the `briareus/code-review` status of a
+project with `enforceReviewOutcome` never quotes a private finding: an incomplete
+one reads `Review incomplete at <sha>: N reasons, kept private` instead of the
+first reason. Changes required and passed already say only counts.
+
 **Migration.** `2026_11_13_120000_add_private_self_review` adds
-`projects.private_self_review`, off for every project; its way down drops it.
+`projects.private_self_review`, off for every project, and
+`code_reviews.private_self_review`, off for every review stored before; its way
+down drops both.
 
 **Not covered.** A review whose session owner, `prAuthor` and server account
 cannot be matched to the pull request's author is the ordinary, published one.

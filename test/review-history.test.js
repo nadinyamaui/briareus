@@ -1530,6 +1530,9 @@ describe('reconcileFinding', () => {
     expect(refusedPrivately({ reconciliation: 'adopted', priorFindingRef: 'r-fix', commentId: 9 })).toContain(
       'posts nothing',
     );
+    // Nothing a private review registers names a posted comment.
+    expect(refusedPrivately({ reconciliation: 'new', commentId: 999 })).toContain('carry no commentId');
+    expect(privately({ reconciliation: 'new' })).toMatchObject({ reconciliation: 'new', commentId: null });
     expect(
       refusedPrivately({ reconciliation: 'adopted', priorFindingRef: 'r-fix', revisitReason: 'x' }),
     ).toContain('revisitReason goes with');

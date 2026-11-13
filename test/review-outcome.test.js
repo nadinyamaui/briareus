@@ -738,6 +738,16 @@ describe('statusFor', () => {
       state: 'error',
       description: 'Review incomplete: The verify step did not run for aaaaaaa (+1 more)',
     });
+    // A private self-review's reasons quote findings that are not on GitHub.
+    const incomplete = compute({
+      stages: stages({ verify: { status: 'pending' } }),
+      findings: [finding({ title: 'SQL injection in login handler' })],
+    });
+    expect(statusFor(incomplete, { privately: true })).toEqual({
+      state: 'error',
+      description: 'Review incomplete at aaaaaaa: 2 reasons, kept private',
+    });
+    expect(statusFor(incomplete).description).toContain('Review incomplete: ');
     expect(status({ current: { headSha: next }, rounds: { limitReached: true, used: 3, limit: 3 } })).toEqual(
       {
         state: 'error',
