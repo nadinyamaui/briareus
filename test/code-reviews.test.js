@@ -282,8 +282,12 @@ describe('a private self-review in the prompts', () => {
     expect(publish).toContain('Before registering anything, reconcile each finding');
     expect(publish).toContain('an earlier decision without a thread that is `fix` or `optional`');
     expect(publish).toContain(
-      'register every earlier decision without a thread whose disposition is `fix` as adopted',
+      'register every earlier decision without a thread whose disposition is `fix` and that has no `threadGone` as adopted',
     );
+    // Not every thread-less decision is this private review's: public summary-only and
+    // deleted-thread ones are in the history too, and the server refuses to adopt the latter.
+    expect(publish).toContain('or by a public review');
+    expect(publish).toContain('and has no `threadGone`');
     expect(publish).not.toContain('make it visible in its thread');
     expect(publish).toContain('and no commentId');
   });
