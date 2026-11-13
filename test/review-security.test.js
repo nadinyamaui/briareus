@@ -521,6 +521,17 @@ describe('the security result', () => {
     ).toBe('pending');
   });
 
+  it('carries over, not stale, to a rebase of what the pass read', () => {
+    const rebased = { headSha: next, baseRef: 'main' };
+    const carried = result({ current: rebased, carried: rebased });
+    expect(carried).toMatchObject({ result: 'passed', stale: false, headSha: head });
+    expect(carried.reasons.at(-1)).toMatchObject({ code: 'carried_over', effect: 'note' });
+    expect(carried.reasons.at(-1).message).toContain('the security pass covered aaaaaaa');
+    expect(result({ current: { headSha: 'c'.repeat(40), baseRef: 'main' }, carried: rebased }).stale).toBe(
+      true,
+    );
+  });
+
   it('goes stale, and pending, when the head moves or the base branch changes', () => {
     const moved = result({ current: { headSha: next, baseRef: 'main' } });
     expect(moved).toMatchObject({ result: 'pending', stale: true, headSha: head });
