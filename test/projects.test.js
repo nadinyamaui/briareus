@@ -413,6 +413,20 @@ describe('enforcing the code review outcome', () => {
   });
 });
 
+describe('keeping a project’s code reviews off GitHub', () => {
+  it('posts by default, and only a real boolean switches it', async () => {
+    const saved = await createProject({ ...base });
+    expect(saved.postReviewToGithub).toBe(true);
+    expect((await updateProject(saved.id, { postReviewToGithub: false })).postReviewToGithub).toBe(false);
+    expect((await updateProject(saved.id, { label: 'Renamed' })).postReviewToGithub).toBe(false);
+    for (const bad of ['false', 0, null])
+      await expect(updateProject(saved.id, { postReviewToGithub: bad })).rejects.toThrow(
+        'postReviewToGithub must be true or false',
+      );
+    expect((await updateProject(saved.id, { postReviewToGithub: true })).postReviewToGithub).toBe(true);
+  });
+});
+
 describe('setting a project aside for the review benchmark', () => {
   it('is off until switched on with a real boolean, and stays as set', async () => {
     const saved = await createProject({ ...base });
@@ -1077,6 +1091,7 @@ describe('settings the review outcome is computed from', () => {
       'enforceReviewOutcome',
       'reviewRoundLimit',
       'approvalPolicy',
+      'postReviewToGithub',
     ]);
   });
 

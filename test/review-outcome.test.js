@@ -746,6 +746,20 @@ describe('statusFor', () => {
     );
   });
 
+  it('says nothing of the reasons for a project that keeps its reviews off GitHub', () => {
+    const incomplete = compute({
+      stages: stages({ verify: { status: 'pending' } }),
+      findings: [finding({ title: 'Secret token logged' })],
+    });
+    expect(statusFor(incomplete, { privately: true })).toEqual({
+      state: 'error',
+      description: 'Review incomplete at aaaaaaa: 2 reasons, kept off GitHub',
+    });
+    expect(statusFor(compute({ findings: [verified('fix')] }), { privately: true }).description).toBe(
+      '1 required fix at aaaaaaa',
+    );
+  });
+
   it('keeps the description within what GitHub accepts', () => {
     const long = status({ findings: [finding({ title: 'x'.repeat(400) })] });
     expect(long.state).toBe('error');

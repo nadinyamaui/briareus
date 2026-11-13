@@ -12,6 +12,12 @@ vi.mock('../lib/prtasks.js', () => ({
   prBodyPrompt: vi.fn(() => 'BODY'),
 }));
 
+const decisions = vi.hoisted(() => ({ note: vi.fn(async () => null) }));
+vi.mock('../lib/review-private.js', () => ({
+  postsReviewToGithub: (project) => project?.postReviewToGithub !== false,
+  privateFeedbackNote: decisions.note,
+}));
+
 import { getAction, listActions, actionSessionSpec } from '../lib/actions.js';
 import * as prtasks from '../lib/prtasks.js';
 
@@ -180,6 +186,18 @@ describe('implement-feedback', () => {
       branch: 'feat',
       project,
     });
+  });
+
+  it('adds the required fixes a review kept off GitHub, which the pull request does not carry', async () => {
+    const input = { repo: 'acme/shop', prNumber: 5, branch: 'feat', baseBranch: 'main' };
+    decisions.note.mockClear();
+    expect(await action.prompt({ ...input, project: { repo: 'acme/shop' } })).toBe('FEEDBACK');
+    expect(decisions.note).not.toHaveBeenCalled();
+    const quiet = { repo: 'acme/shop', postReviewToGithub: false };
+    expect(await action.prompt({ ...input, project: quiet })).toBe('FEEDBACK');
+    decisions.note.mockResolvedValueOnce('PRIVATE FIXES');
+    expect(await action.prompt({ ...input, project: quiet })).toBe('FEEDBACK\n\nPRIVATE FIXES');
+    expect(decisions.note).toHaveBeenCalledWith('acme/shop', 5);
   });
 
   it('titles the session after that pull request', () => {

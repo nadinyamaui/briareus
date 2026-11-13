@@ -5646,6 +5646,53 @@ describe('native Codex code review', () => {
     expect(failCodeReview).not.toHaveBeenCalled();
   });
 
+  it('posts nothing to GitHub for a project that keeps its reviews off it, decided as the review starts', async () => {
+    state.projects[0].postReviewToGithub = false;
+    sendDevMessage(id, '/review');
+    await vi.waitFor(() => expect(invocations).toHaveLength(1));
+    // Switched back while the review runs: this run still finishes the way it began.
+    state.projects[0].postReviewToGithub = true;
+    fs.writeFileSync(summaryPath, 'A candidate finding');
+    finishReview(invocations[0]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(2));
+    const quiet = 'This project keeps its code reviews off GitHub: post nothing on the pull request.';
+    const publish = invocations[1].child.prompt;
+    expect(publish).toContain('Record the review above of acme/shop PR #77');
+    expect(publish).toContain(quiet);
+    expect(publish).toContain('review_finding_add');
+    expect(publish).not.toContain('Create a single comment in the PR');
+    expect(publish).not.toContain('inline review comment');
+    expect(job.codeReviewPrivate).toBe(true);
+    finishTurn(invocations[1]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(3));
+    const verify = invocations[2].child.prompt;
+    expect(verify).toContain(quiet);
+    expect(verify).not.toContain('resolveReviewThread');
+    finishTurn(invocations[2]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(4));
+    const label = invocations[3].child.prompt;
+    expect(label).toContain(quiet);
+    expect(label).not.toContain('event=APPROVE');
+    expect(label).not.toContain('feedback-given');
+    finishTurn(invocations[3]);
+    await vi.waitFor(() => expect(job.status).toBe('idle'));
+    expect(job.error).toBeNull();
+    // The next review reads the setting again.
+    sendDevMessage(id, '/review');
+    await vi.waitFor(() => expect(invocations).toHaveLength(5));
+    fs.writeFileSync(summaryPath, 'A candidate finding');
+    finishReview(invocations[4]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(6));
+    expect(invocations[5].child.prompt).toContain('Create a single comment in the PR');
+    expect(job.codeReviewPrivate).toBeUndefined();
+    finishTurn(invocations[5]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(7));
+    finishTurn(invocations[6]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(8));
+    finishTurn(invocations[7]);
+    await vi.waitFor(() => expect(job.status).toBe('idle'));
+  });
+
   it('tells native review that database verification is blocked when none was provisioned', async () => {
     sendDevMessage(id, '/review');
     await vi.waitFor(() => expect(invocations).toHaveLength(1));

@@ -60,6 +60,91 @@ describe('review finalization prompt', () => {
   });
 });
 
+describe('the prompts of a review kept off GitHub', () => {
+  const head = 'a'.repeat(40);
+  const history = { path: '/tmp/prompts/job-review-history.json', threads: 2, withoutThread: 1 };
+  const publish = {
+    repo: 'acme/shop',
+    prNumber: 7,
+    head,
+    history,
+    round: { round: 2, limit: 3, scope: 'full' },
+  };
+  // What would write to the pull request, in any step's wording.
+  const WRITES = [
+    /gh api repos\/[^ ]*\/(comments|reviews|replies)/,
+    'inline review comment',
+    'resolveReviewThread',
+    'event=APPROVE',
+    'Label the PR',
+    'CUSTOM LABEL POLICY',
+  ];
+  const writesNothing = (prompt) => {
+    for (const write of WRITES)
+      if (typeof write === 'string') expect(prompt).not.toContain(write);
+      else expect(prompt).not.toMatch(write);
+    expect(prompt).toContain(
+      'This project keeps its code reviews off GitHub: post nothing on the pull request.',
+    );
+  };
+
+  it('posts by default, exactly as before', () => {
+    expect(reviewPublishPrompt({ ...publish, post: true })).toBe(reviewPublishPrompt(publish));
+    expect(reviewVerifyPrompt({ post: true })).toBe(reviewVerifyPrompt());
+    const label = { labels: 'CUSTOM LABEL POLICY', repo: 'acme/shop', prNumber: 7, head };
+    expect(reviewLabelPrompt({ ...label, post: true })).toBe(reviewLabelPrompt(label));
+  });
+
+  it('registers and summarises the findings without posting them', () => {
+    const prompt = reviewPublishPrompt({ ...publish, post: false });
+    writesNothing(prompt);
+    expect(prompt).toContain('Record the review above of acme/shop PR #7');
+    expect(prompt).toContain('# Code Review');
+    expect(prompt).toContain('review_finding_add');
+    expect(prompt).toContain('It carries no commentId, since nothing is posted.');
+    expect(prompt).toContain('review_summary_set');
+    expect(prompt).toContain('code review round 2 of 3');
+    // Earlier claims kept without a thread are adopted by reference, not posted again.
+    expect(prompt).toContain('an earlier decision without a thread whose disposition is `fix` or `optional`');
+    expect(prompt).not.toContain('Post it as a new inline comment');
+    expect(prompt).not.toContain('reviewer:code-review');
+  });
+
+  it('tells the security pass findings apart without inline comments', () => {
+    const prompt = reviewPublishPrompt({
+      ...publish,
+      post: false,
+      security: { path: '/tmp/prompts/job-review-security.json', findings: 2 },
+    });
+    writesNothing(prompt);
+    expect(prompt).toContain('reconcile, and register each of them');
+    expect(prompt).not.toContain('its inline comment starts the same way');
+    const failed = reviewPublishPrompt({ ...publish, post: false, securityFailed: true });
+    expect(failed).toContain('reconciled and registered like any other');
+  });
+
+  it('records verdicts without replying on threads', () => {
+    const prompt = reviewVerifyPrompt({ enforced: true, post: false });
+    writesNothing(prompt);
+    expect(prompt).toContain('review_finding_update');
+    expect(prompt).toContain('Fixed since:');
+    expect(prompt).toContain('Briareus computes this review');
+  });
+
+  it('finishes with a report and no labels or approval', () => {
+    const label = { labels: 'CUSTOM LABEL POLICY', repo: 'acme/shop', prNumber: 7, head, post: false };
+    const prompt = reviewLabelPrompt(label);
+    writesNothing(prompt);
+    expect(prompt).toContain(
+      `Discovery, publication and independent verification must all have succeeded for ${head}`,
+    );
+    expect(prompt).toContain('Add or remove no label and submit no review or approval');
+    const computed = reviewLabelPrompt({ ...label, outcome: { outcome: 'changes_required', reasons: [] } });
+    writesNothing(computed);
+    expect(computed).toContain('**changes required**');
+  });
+});
+
 describe('review publication prompt', () => {
   const head = 'a'.repeat(40);
   const base = { repo: 'acme/shop', prNumber: 7, head };
