@@ -1282,6 +1282,108 @@ next written. And approvals, shared commits and statuses on real GitHub pull
 requests were exercised here against a stand-in for GitHub's API, not against
 GitHub.
 
+### Review benchmark and quality
+
+Two ways to see how well the code review does its job, both in the core and its
+API. Neither touches production incidents: no incident is read, counted or
+turned into a case.
+
+**The benchmark** measures the review against answers people settled
+beforehand. It lives in a project set aside for it (`reviewBenchmark` on the
+project, admin, `PUT /settings/projects/{id}`; off for every project), whose
+repository holds the curated changes. A run opens pull requests and branches
+there and closes them again, so it is refused on any other project.
+
+- **A case** (`POST /review-benchmarks/cases`) is a change, two commits of that
+  repository (`baseSha`, `headSha`), what the reviewer is shown of it (`title`,
+  `description`) and its answer: `kind` (`defective` or `clean`), the `defects`
+  (file, lines, severity, summary) and a `referenceFix`. `origin` is
+  `constructed` (built for the benchmark) or `historical` (taken from a past
+  change); there is no incident origin. The answer stays in Briareus's
+  database: a run opens the pull request from the title, the description and the
+  two commits alone, the answer is never written to a workspace or a prompt, and
+  no agent session can reach these routes. A title or description that quotes a
+  defect's summary or the reference fix is refused. The rest is the curator's to
+  keep out of the repository: commit the case's commits under neutral branch
+  names and messages, and never commit the reference fix or the answer, since
+  the reviewer reads the repository.
+- **Adjudication.** A case is run only once somebody other than its author
+  agreed with its answer (`POST /review-benchmarks/cases/{id}/adjudications`,
+  `agree` or `disagree`), and while nobody disagrees: `standing.status`
+  `adjudicated`. An adjudication is of the case's `answerHash`, the fingerprint
+  of the change and the answer, so editing the case (`PUT`) leaves the earlier
+  verdicts about another answer, makes the editor its author, and the case is a
+  `draft` again. Cases are retired, never deleted.
+- **A run** (`POST /review-benchmarks/runs`) takes every adjudicated case, or
+  the ones named, and puts each through the real review, a few at once
+  (`concurrency`, 1 to 5): two branches at its commits under neutral names
+  (`review/<random>`), a pull request between them, and a code review started as
+  the run's requester's own, exactly as `POST /actions` would, on the project's
+  configured review runtime, with discovery, publication, verification and the
+  label step as for any pull request. When the review ends, what it left (its
+  status, findings and verdicts, its outcome, its cost) is kept with the result,
+  the pull request is closed and the branches deleted. Each step is recorded
+  before the next, so a run the server picks up after a restart neither opens a
+  second pull request nor starts a second review; a review that has not ended
+  within six hours is given up on. A run records the runtime it started under
+  and the review configuration (the server's commit, null when it cannot be
+  read, as in the container image, which has no `.git`; `securityReview`,
+  `enforceReviewOutcome`, `reviewRoundLimit`, fingerprints of the approval
+  policy and the label template). To evaluate a
+  prompt, tool or runtime change, run once before it and once after: a run takes
+  no runtime of its own, so the comparison is of the project's settings as they
+  are, not of a silent switch.
+- **Scoring** holds each review against the answer as it was when the run
+  started. A review that did not end, or ended without completing what it owed
+  (outcome `pending` or `incomplete`), is no result, never a pass. A finding is
+  tied to a defect by a person's judgment, else by its location (the same file,
+  within 3 lines), which stays `provisional` until somebody judges it
+  (`PUT …/judgments/{findingId}`: `matches` a defect, `false_positive`,
+  or `valid_unlisted`, a real problem the answer misses; with `harmfulFix` when
+  the fix it suggests would do harm). A defect is `caught` when the finding
+  that stands for it (one a person matched to it, if any, before a location
+  match; then the strongest verdict) was ruled a required fix,
+  `caught_nonblocking` when only Optional, `dismissed` when verification
+  refuted it, else `missed`; a required fix that
+  matches no defect is a false positive, and a second finding about a defect a
+  duplicate. The summary gives recall (blocking, and with any verdict), blocking
+  precision, false positives, harmful fixes, duplicates, outcomes against the
+  expected ones (`changes_required` for a defective case, `passed` for a clean
+  one), cost with whether it is estimated and how many turns had no price, and
+  its caveats. An empty report on a defective change is every defect missed; the
+  number of findings is never a score.
+- **Comparing** (`GET /review-benchmarks/compare?a=&b=`) puts two runs side by
+  side on the cases both ran against the same answer, with the defects each
+  caught that the other did not. It calls two runs alike only when both
+  recorded the server's commit.
+
+**Review quality** (`GET /review-quality?repo=&days=`) describes a project's
+reviews over a window from what the server already keeps, and is not a verdict
+on whether they were right: the claims and how they were ruled, telling
+verdicts people gave (through the API or on GitHub) from those review sessions
+gave; pull requests by the rounds they took and the rounds continued past the
+limit; findings by how they related to earlier threads (`suppressed` and
+`adopted` are repeats caught); cost per runtime, with its estimation and
+unpriced caveats; and how long reviews waited on people: a verdict from when
+its claim was stored, a revision's first human approval from when its review
+ended, a continued round from when the round before it ended, and what waits at
+the limit or for approval now.
+
+**Migration.** `2026_11_12_130000_add_review_benchmarks` adds
+`projects.review_benchmark` (off for every existing project) and five tables:
+`review_benchmark_cases`, `review_benchmark_adjudications`,
+`review_benchmark_runs`, `review_benchmark_results` (with the answer and the
+review kept as they were) and `review_benchmark_judgments`. Nothing is
+back-filled; rolling back drops them and the column. Review quality needs no
+schema of its own.
+
+What this does not do. The benchmark is as good as its cases: Briareus ships
+none, and adjudication says that a second person agreed, not that the answer is
+right. A location match says where a finding is, not what it says, which is
+why it stays provisional. Reviews vary from run to run, so a difference between
+two runs of the same configuration is noise. And the runner was exercised here
+against a stand-in for GitHub's API, not against GitHub.
+
 ## Previews and browser access
 
 Run profiles serve session checkouts, branches and pull requests. A shared

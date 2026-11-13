@@ -274,6 +274,18 @@ from an account no session acts as. The result is published as its own commit
 status, `briareus/approvals`, beside `briareus/code-review` (see
 [Risk-based human approvals](docs/features.md#risk-based-human-approvals)).
 
+How well the review does its job is measured on a benchmark of curated changes,
+in a project set aside for it (`reviewBenchmark`): each case is a change with an
+answer (defective or clean, its defects, a reference fix) that somebody other
+than its author adjudicated, and that never reaches the reviewer. A run puts the
+adjudicated cases through the real review on throwaway pull requests and scores
+each against its answer: missed defects, false positives, harmful suggested
+fixes, repeated findings and outcomes, with cost and its caveats, and two runs
+can be compared before and after a prompt, tool or runtime change.
+`GET /review-quality` summarizes a project's real reviews: how claims were ruled
+and by whom, rounds, repeats, cost and how long reviews waited on people (see
+[Review benchmark and quality](docs/features.md#review-benchmark-and-quality)).
+
 A session’s `qaLoop` starts QA when the task settles on an open pull request. QA
 writes and executes a test sheet and reports passed, failed, or incomplete coverage.
 A new head invalidates the previous result. Disarming QA leaves any running QA

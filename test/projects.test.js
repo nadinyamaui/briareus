@@ -413,6 +413,20 @@ describe('enforcing the code review outcome', () => {
   });
 });
 
+describe('setting a project aside for the review benchmark', () => {
+  it('is off until switched on with a real boolean, and stays as set', async () => {
+    const saved = await createProject({ ...base });
+    expect(saved.reviewBenchmark).toBe(false);
+    expect((await updateProject(saved.id, { reviewBenchmark: true })).reviewBenchmark).toBe(true);
+    expect((await updateProject(saved.id, { label: 'Renamed' })).reviewBenchmark).toBe(true);
+    for (const bad of ['true', 1, null])
+      await expect(updateProject(saved.id, { reviewBenchmark: bad })).rejects.toThrow(
+        'reviewBenchmark must be true or false',
+      );
+    expect((await updateProject(saved.id, { reviewBenchmark: false })).reviewBenchmark).toBe(false);
+  });
+});
+
 describe('the local checkout auto-update', () => {
   it('keeps the update commands one per line and needs a checkout to be on', async () => {
     const saved = await createProject({
