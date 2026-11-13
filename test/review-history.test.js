@@ -1561,6 +1561,57 @@ describe('reconcileFinding', () => {
       }).message,
     ).toContain('Comment 10 was on the PR before');
   });
+
+  describe('for a review that posts nothing to GitHub', () => {
+    const quietly = (input) => reconcileFinding(held, input, { ...review, privately: true });
+    const quietlyRefused = (input) => {
+      try {
+        quietly(input);
+      } catch (e) {
+        return { status: e.status, message: e.message };
+      }
+      return null;
+    };
+
+    it('adopts an earlier required fix that has no thread, so it is ruled on again', () => {
+      expect(quietly({ reconciliation: 'adopted', priorFindingRef: 'r-fix' })).toEqual({
+        reconciliation: 'adopted',
+        headSha: head,
+        findingRef: 'r-fix',
+        priorThreadId: null,
+        priorDisposition: 'fix',
+        priorReason: 'Reproduced.',
+        priorUrl: null,
+      });
+      // Only a claim still standing: a refuted one is suppressed, as for any review.
+      expect(quietlyRefused({ reconciliation: 'adopted', priorFindingRef: 'r-none' }).message).toContain(
+        'only an unresolved thread',
+      );
+      expect(
+        quietlyRefused({ reconciliation: 'adopted', priorFindingRef: 'r-fix', revisitReason: 'x' }).message,
+      ).toContain('revisitReason goes with');
+      // A review that posts adopts it too, so a fix left by a private review is cleared
+      // once the project posts again instead of standing as owed for ever.
+      expect(place({ reconciliation: 'adopted', priorFindingRef: 'r-fix' })).toMatchObject({
+        reconciliation: 'adopted',
+        findingRef: 'r-fix',
+        priorThreadId: null,
+        priorDisposition: 'fix',
+      });
+    });
+
+    it('refuses a finding that names a comment, since nothing may have been posted', () => {
+      for (const input of [
+        { commentId: 900 },
+        { reconciliation: 'revisit', priorFindingRef: 'r-none', commentId: 901, revisitReason: 'x' },
+      ])
+        expect(quietlyRefused(input)).toEqual({
+          status: 400,
+          message: 'This project does not post code reviews to GitHub, so a finding carries no commentId',
+        });
+      expect(quietly({})).toMatchObject({ reconciliation: 'new', commentId: null });
+    });
+  });
 });
 
 describe('findingDecision', () => {

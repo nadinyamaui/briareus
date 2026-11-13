@@ -115,6 +115,26 @@ It is independent of the agent's `running`/`completed`/`failed` execution status
 and the individual findings' verdicts. Existing and new reviews start as `pending`,
 and rerunning a review in the same session resets it to `pending`.
 
+### Keeping reviews off GitHub
+
+`postReviewToGithub` on the project, on by default, says whether a code review
+writes to GitHub at all. Switched off, the review runs the same steps
+(discovery, any security pass, publication, verification and the last step)
+and posts nothing: no summary comment, inline comments, verdict replies or
+resolved threads, no labels and no approval. Its findings, verdicts and
+summary are kept on the server and read through
+`GET /api/v1/pulls/{number}/code-reviews`. The setting is read when a review
+starts, so a review already running finishes the way it began.
+
+Later rounds still reconcile with what earlier reviews decided: a required or
+optional fix kept without a thread is adopted by its reference and ruled on
+again at the new head, so a fix that was made is dismissed as fixed instead of
+standing as owed. The implement-feedback action is given the required fixes
+still owed as data, since they are not on the pull request, and keeps them out
+of the comments it posts. A project that also has `enforceReviewOutcome` still
+gets its `briareus/code-review` commit status, whose description then names how
+many reasons an incomplete review has but not what they say.
+
 ### Earlier review decisions
 
 A review does not repeat what earlier reviews of the same pull request already
@@ -1499,6 +1519,8 @@ These additions are present in the server revision documented here:
   passed) is computed by the server from recorded stages, findings and
   evidence, apart from whether the session finished; a project can publish it
   as the `briareus/code-review` commit status (`enforceReviewOutcome`).
+- A project can keep its code reviews off GitHub (`postReviewToGithub` off):
+  the same review runs and its findings and verdicts stay on the server.
 - A project can have every code review run a security pass (`securityReview`:
   off, advisory or required): a second discovery whose findings are published
   and verified with the rest, with a separately tracked security result and a

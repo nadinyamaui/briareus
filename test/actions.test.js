@@ -12,6 +12,11 @@ vi.mock('../lib/prtasks.js', () => ({
   prBodyPrompt: vi.fn(() => 'BODY'),
 }));
 
+const decisions = vi.hoisted(() => ({ note: vi.fn(async () => null) }));
+vi.mock('../lib/review-private.js', () => ({
+  privateFeedbackNote: decisions.note,
+}));
+
 import { getAction, listActions, actionSessionSpec } from '../lib/actions.js';
 import * as prtasks from '../lib/prtasks.js';
 
@@ -180,6 +185,30 @@ describe('implement-feedback', () => {
       branch: 'feat',
       project,
     });
+  });
+
+  it('adds the required fixes a review kept off GitHub, which the pull request does not carry', async () => {
+    const input = { repo: 'acme/shop', prNumber: 5, branch: 'feat', baseBranch: 'main' };
+    decisions.note.mockClear();
+    const quiet = { repo: 'acme/shop', postReviewToGithub: false };
+    expect(await action.prompt({ ...input, project: quiet })).toBe('FEEDBACK');
+    decisions.note.mockResolvedValueOnce('PRIVATE FIXES');
+    expect(await action.prompt({ ...input, project: quiet })).toBe('FEEDBACK\n\nPRIVATE FIXES');
+    expect(decisions.note).toHaveBeenCalledWith('acme/shop', 5);
+    // Still owed once the project posts its reviews again: they were recorded privately.
+    decisions.note.mockResolvedValueOnce('PRIVATE FIXES');
+    expect(await action.prompt({ ...input, project: { repo: 'acme/shop' } })).toBe(
+      'FEEDBACK\n\nPRIVATE FIXES',
+    );
+  });
+
+  it('still starts when the stored fixes cannot be read', async () => {
+    const input = { repo: 'acme/shop', prNumber: 5, branch: 'feat', baseBranch: 'main' };
+    decisions.note.mockRejectedValueOnce(new Error('database down'));
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(await action.prompt({ ...input, project: { repo: 'acme/shop' } })).toBe('FEEDBACK');
+    expect(error).toHaveBeenCalledWith('Private review fixes for acme/shop#5: database down');
+    error.mockRestore();
   });
 
   it('titles the session after that pull request', () => {
