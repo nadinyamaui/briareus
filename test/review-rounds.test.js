@@ -583,6 +583,96 @@ function decision(over = {}) {
 }
 
 describe('what is unresolved', () => {
+  it.each(['threadId', 'commentId'])('settles duplicate references to the same %s together', (key) => {
+    const shared = key === 'threadId' ? 'T1' : 11;
+    const rows = [
+      decision({ findingRef: 'native', [key]: shared, verdict: 'fix', title: 'Normalize dates' }),
+      decision({ findingRef: 'spec', [key]: shared, verdict: 'fix', title: 'Normalize dates' }),
+      decision({
+        findingRef: 'native',
+        verdict: 'dismiss',
+        verification: 'confirmed',
+        rationale: 'The current code normalizes the offset before saving.',
+        decidedAt: '2026-11-10T11:00:00.000Z',
+      }),
+    ];
+    expect(unresolvedWork(rows)).toEqual({ fix: [], unverified: [] });
+    expect([...settledClaims(rows)].sort()).toEqual(['native', 'spec']);
+  });
+
+  it('counts duplicate thread records once while a fix is still owed', () => {
+    const rows = [
+      decision({ findingRef: 'native', threadId: 'T1', verdict: 'fix' }),
+      decision({ findingRef: 'spec', threadId: 'T1', verdict: 'fix', security: true }),
+    ];
+    expect(unresolvedWork(rows).fix).toHaveLength(1);
+    expect(securityClaims(rows)).toEqual([
+      expect.objectContaining({ threadId: 'T1', status: 'fix', security: true }),
+    ]);
+    expect([...settledClaims(rows)]).toEqual([]);
+  });
+
+  it('settles a threadless duplicate with the same title, location and original revision', () => {
+    const rows = [
+      decision({ findingRef: 'native', threadId: 'T1', title: 'Normalize dates', verdict: 'fix' }),
+      decision({ findingRef: 'spec', title: 'Normalize dates', verdict: 'fix' }),
+      decision({
+        findingRef: 'native',
+        threadId: 'T1',
+        title: 'Normalize dates',
+        verdict: 'dismiss',
+        verification: 'confirmed',
+        rationale: 'Verified fixed in the current code.',
+        decidedAt: '2026-11-10T11:00:00.000Z',
+      }),
+    ];
+    expect(unresolvedWork(rows)).toEqual({ fix: [], unverified: [] });
+    expect([...settledClaims(rows)].sort()).toEqual(['native', 'spec']);
+    // A dismissal still needs proof, even when another reviewer duplicated the claim.
+    rows[2].verification = 'plausible';
+    expect(unresolvedWork(rows).unverified).toHaveLength(1);
+    expect([...settledClaims(rows)]).toEqual([]);
+  });
+
+  it.each([
+    { title: 'Another defect' },
+    { filePath: 'src/other.js' },
+    { line: 13 },
+    { raisedSha: sha('b') },
+    { raisedSha: null },
+  ])('does not match a threadless finding with a different or incomplete fingerprint: %j', (different) => {
+    const rows = [
+      decision({
+        findingRef: 'fixed',
+        threadId: 'T1',
+        title: 'Normalize dates',
+        verdict: 'fix',
+        resolved: true,
+      }),
+      decision({ findingRef: 'owed', title: 'Normalize dates', verdict: 'fix', ...different }),
+    ];
+    expect(unresolvedWork(rows).fix.map((entry) => entry.findingRef)).toEqual(['owed']);
+    expect([...settledClaims(rows)]).toEqual(['fixed']);
+  });
+
+  it('does not settle distinct threads with the same title and location', () => {
+    const rows = [
+      decision({
+        findingRef: 'fixed',
+        threadId: 'T1',
+        title: 'Normalize dates',
+        verdict: 'dismiss',
+        verification: 'confirmed',
+        rationale: 'Verified fixed in the current code.',
+      }),
+      decision({ findingRef: 'owed', threadId: 'T2', title: 'Normalize dates', verdict: 'fix' }),
+      // Ambiguous between two published claims: it must still be ruled on separately.
+      decision({ findingRef: 'unanchored', title: 'Normalize dates', verdict: 'fix' }),
+    ];
+    expect(unresolvedWork(rows).fix.map((entry) => entry.findingRef)).toEqual(['owed', 'unanchored']);
+    expect([...settledClaims(rows)]).toEqual(['fixed']);
+  });
+
   it('lists the required fixes still owed and the findings nobody verified', () => {
     const work = unresolvedWork([
       decision({

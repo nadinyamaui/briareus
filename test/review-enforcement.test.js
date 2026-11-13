@@ -393,6 +393,45 @@ describe('the stored outcome', () => {
     ]);
   });
 
+  it('passes a re-review when one verified decision clears duplicate prior finding references', async () => {
+    reviewed(next, { round: 2 });
+    const prior = {
+      threadId: 'PRRT_1',
+      commentId: 501,
+      title: 'Normalize offset-bearing dates before saving',
+      filePath: 'lib/discounts.js',
+      verdict: 'fix',
+      resolved: false,
+      decidedAt: '2026-11-10T10:00:00.000Z',
+    };
+    store.decisions = [
+      { ...prior, findingRef: 'ref-native' },
+      { ...prior, findingRef: 'ref-spec' },
+      {
+        findingRef: 'ref-native',
+        verdict: 'dismiss',
+        verification: 'confirmed',
+        rationale: 'lib/discounts.js:12 converts the date to UTC before saving.',
+        headSha: next,
+        decidedAt: '2026-11-10T11:00:00.000Z',
+      },
+    ];
+    // The re-review accounted for the duplicate using the other reference.
+    store.findings = [
+      finding({
+        findingRef: 'ref-spec',
+        reconciliation: 'suppressed',
+        shouldFix: 'dismiss',
+        verification: null,
+        threadId: null,
+        commentId: null,
+      }),
+    ];
+    const { outcome } = await refresh(on, { current: { headSha: next, baseRef: 'main' } });
+    expect(outcome).toMatchObject({ outcome: 'passed', reasons: [], status: { state: 'success' } });
+    expect(posted().at(-1)).toMatchObject({ sha: next, state: 'success', context: 'briareus/code-review' });
+  });
+
   it('does not pass a rerun or a later review on a dismissal an earlier one never proved', async () => {
     // Review one dismissed its finding on a likelihood and resolved the thread. The
     // verdict is the pull request's decision from then on, kept with how well it was
