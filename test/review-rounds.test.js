@@ -1008,6 +1008,41 @@ describe('how current the unresolved work is', () => {
     expect(stored.unresolved.asOf.source).toBe('stored');
   });
 
+  it.each([true, false])(
+    'keeps the live read consistent for a moved duplicate, resolved %s',
+    async (resolved) => {
+      const prior = { title: 'Validate before saving relationships', verdict: 'fix', source: 'review' };
+      const decisions = [
+        decision({ ...prior, findingRef: 'native' }),
+        decision({ ...prior, findingRef: 'posted', threadId: 'T1', commentId: 11, line: 40 }),
+      ];
+      const work = await liveUnresolved({
+        cfg,
+        repo,
+        prNumber: resolved ? 61 : 62,
+        decisions,
+        fetch: github([thread('T1', 11, { resolved, line: 40, originalLine: 12 })]),
+      });
+      expect(work.unverified).toEqual([]);
+      if (resolved) expect(work.fix).toEqual([]);
+      else expect(work.fix.length).toBeGreaterThan(0);
+      // A read must not rewrite the stored view while repairing its live projection.
+      expect(decisions[1].line).toBe(40);
+      expect(decisions[1].resolved).toBe(false);
+    },
+  );
+
+  it('does not clear a deleted thread using its stale stored resolution', async () => {
+    const work = await liveUnresolved({
+      cfg,
+      repo,
+      prNumber: 63,
+      decisions: [decision({ findingRef: 'deleted', threadId: 'T1', verdict: 'fix', resolved: true })],
+      fetch: github([]),
+    });
+    expect(work.fix).toEqual([expect.objectContaining({ findingRef: 'deleted' })]);
+  });
+
   it('answers the stored state, marked as such, when GitHub cannot be read', async () => {
     // Another pull request than the one the test above just read: that answer is kept.
     await useUp(17);

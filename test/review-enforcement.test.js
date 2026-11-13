@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { buildReviewHistory } from '../lib/review-history.js';
 
 // The stage and outcome tables as lib/db.js keeps them, in memory, one pull request at
 // a time. The SQL, its row lock included, runs against a real MySQL in
@@ -392,6 +393,88 @@ describe('the stored outcome', () => {
       'fix_owed',
     ]);
   });
+
+  it.each([null, 27])(
+    'settles a suppressed prior fix after its thread moves, original start %s',
+    async (originalStartLine) => {
+      reviewed(next, { round: 2 });
+      const original = originalStartLine ?? 29;
+      const prior = {
+        title: 'Validate before saving relationships',
+        filePath: 'lib/expenses.js',
+        line: original,
+        raisedSha: head,
+        verdict: 'fix',
+        verification: 'confirmed',
+        resolved: false,
+        resolvedBefore: false,
+        source: 'review',
+        decidedAt: '2026-11-10T10:00:00.000Z',
+      };
+      // A native registry entry and the published finding were registered at the same
+      // original location. Later pushes moved the live thread, and an earlier sync has
+      // already overwritten its stored line, as happened on the reported pull request.
+      store.decisions = [
+        { ...prior, findingRef: 'native' },
+        { ...prior, findingRef: 'posted', threadId: 'PRRT_1', commentId: 501, line: 40 },
+      ];
+      const history = buildReviewHistory({
+        repo: on.repo,
+        prNumber: 7,
+        decisions: store.decisions,
+        fetched: {
+          viewer: 'reviewer',
+          headSha: next,
+          threads: [
+            {
+              id: 'PRRT_1',
+              resolved: true,
+              path: prior.filePath,
+              line: 40,
+              startLine: originalStartLine == null ? null : 38,
+              originalLine: 29,
+              originalStartLine,
+              comments: [
+                {
+                  id: 501,
+                  commit: head,
+                  author: 'reviewer',
+                  body: prior.title,
+                  at: Date.parse('2026-11-10T09:00:00.000Z'),
+                },
+              ],
+            },
+          ],
+        },
+      });
+      // Apply exactly the metadata sync that loadReviewHistory persists before publish.
+      for (const sync of history.sync)
+        Object.assign(
+          store.decisions.find((d) => d.threadId === sync.threadId),
+          sync,
+        );
+      store.findings = [
+        finding({
+          findingRef: 'posted',
+          reconciliation: 'suppressed',
+          priorDisposition: 'addressed',
+          shouldFix: 'dismiss',
+          verification: null,
+          threadId: null,
+          commentId: null,
+          comments: 'Not repeated: verified still fixed at this head.',
+        }),
+      ];
+      expect((await enforcement.provisionalReviewOutcome(on, 7, { reviewId: 5 })).outcome).toBe('passed');
+      const { outcome } = await refresh(on);
+      expect(outcome).toMatchObject({ outcome: 'passed', status: { state: 'success' } });
+      expect(posted().at(-1)).toMatchObject({ sha: next, state: 'success' });
+      // Omitting an unrelated required fix from this round never clears it.
+      store.decisions.push({ ...prior, findingRef: 'unrelated', line: original + 1 });
+      expect((await refresh(on)).outcome.outcome).toBe('changes_required');
+      expect(posted().at(-1)).toMatchObject({ state: 'failure', description: '1 required fix at bbbbbbb' });
+    },
+  );
 
   it('passes a re-review when one verified decision clears duplicate prior finding references', async () => {
     reviewed(next, { round: 2 });
