@@ -504,7 +504,17 @@ provider, model and effort are used as configured.
   branch, the outcome is `stale` and reads `pending` for the new revision. The
   base branch gaining commits under an unchanged head is not stale: the reviewed
   commits are what they were, and whether a branch must be up to date is the
-  repository's own rule.
+  repository's own rule. A rebase is held to the same rule: when the server sees
+  a new head (GitHub's own rebase as the pull request below it in a stack is
+  merged and it is retargeted, or anybody's) whose change is the one the review
+  read, the review carries over to it instead of turning stale. The change is
+  what the pull request adds to its merge base, compared file by file through
+  GitHub's comparison: same status, name and hunks, hunk line numbers aside,
+  context lines included; a file without a patch by its blob; 300 or more
+  files, or a review whose round has no recorded merge base, never carries
+  over. Whatever the review concluded carries over with it, and the outcome
+  says so with a `carried_over` note. A comparison GitHub does not answer
+  leaves the outcome stale.
 - _The round limit._ An unreviewed revision of a pull request that has used its
   rounds is `incomplete`, not `pending`: no review of it starts by itself, so it
   waits on a person. On the reviewed head the limit changes nothing about the

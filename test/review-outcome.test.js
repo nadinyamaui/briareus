@@ -181,6 +181,41 @@ describe('computeReviewOutcome', () => {
       });
     });
 
+    it('not when the review carries over to a rebase of what it read', () => {
+      const rebased = { headSha: next, baseRef: 'main' };
+      const result = compute({ current: rebased, carried: rebased });
+      expect(result).toMatchObject({ outcome: 'passed', stale: false, headSha: next, baseRef: 'main' });
+      expect(result.reviewed).toEqual({ headSha: head, baseRef: 'main' });
+      expect(result.reasons).toEqual([
+        expect.objectContaining({
+          code: 'carried_over',
+          effect: 'note',
+          reviewedHeadSha: head,
+          headSha: next,
+        }),
+      ]);
+      expect(statusFor(result).description).toBe('Review passed at bbbbbbb: no findings');
+      // A stack collapsing: GitHub retargets onto the merged base and rebases at once.
+      const collapsed = { headSha: next, baseRef: 'trunk' };
+      const retargeted = compute({ current: collapsed, carried: collapsed });
+      expect(retargeted).toMatchObject({ outcome: 'passed', stale: false, baseRef: 'trunk' });
+      expect(retargeted.reasons[0].message).toBe(
+        'The pull request head is bbbbbbb on trunk; the review covered aaaaaaa on main, and the change is the same, so it carries over.',
+      );
+      // What the review concluded carries over with it, a required fix too.
+      expect(compute({ current: rebased, carried: rebased, findings: [verified('fix')] }).outcome).toBe(
+        'changes_required',
+      );
+      // Only to the revision it was established for.
+      expect(
+        compute({ current: { headSha: 'c'.repeat(40), baseRef: 'main' }, carried: rebased }),
+      ).toMatchObject({
+        outcome: 'pending',
+        stale: true,
+      });
+      expect(compute({ current: { headSha: next, baseRef: 'release' }, carried: rebased }).stale).toBe(true);
+    });
+
     it('not for the same head and base, nor when the current revision is unknown', () => {
       expect(compute({ current: { headSha: head, baseRef: 'main' } }).outcome).toBe('passed');
       expect(compute({ current: null }).outcome).toBe('passed');

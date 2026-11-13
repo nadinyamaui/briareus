@@ -45,6 +45,7 @@ import {
   recordCodeReviewStatusPublished,
   refreshCodeReviewOutcome,
   restartCodeReview,
+  saveCodeReviewCarryover,
   saveCodeReviewDecisions,
   saveProject,
   setCodeReviewStage,
@@ -1148,6 +1149,35 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review outcomes on 
     expect(onGithub('a')).toBe('pending');
     expect(await noteReviewedRevision(on, 5700, { headSha: sha('a'), baseRef: 'main' }, { cfg })).toBeNull();
     expect(await getCodeReviewOutcome(repo, 5700)).toBeNull();
+  });
+
+  it('keeps the review standing for a rebase it was recorded to carry over to', async () => {
+    const review = await reviewed(71, 'a');
+    await refresh(on, 71, { reviewId: review.id });
+    const carryover = {
+      repo,
+      prNumber: 71,
+      codeReviewId: review.id,
+      reviewedSha: sha('a'),
+      reviewedBaseRef: 'main',
+      headSha: sha('b'),
+      baseRef: 'trunk',
+      digest: 'd'.repeat(64),
+    };
+    await saveCodeReviewCarryover(carryover);
+    // Recorded twice: the first stays.
+    await saveCodeReviewCarryover({ ...carryover, digest: 'e'.repeat(64) });
+    const state = await readCodeReviewOutcomeState(repo, 71);
+    expect(state.carryovers).toEqual([
+      expect.objectContaining({ ...carryover, id: expect.any(Number), createdAt: expect.any(String) }),
+    ]);
+    const { outcome } = await refresh(on, 71, { current: { headSha: sha('b'), baseRef: 'trunk' } });
+    expect(outcome).toMatchObject({ outcome: 'passed', stale: false, headSha: sha('b'), baseRef: 'trunk' });
+    expect(onGithub('b')).toBe('success');
+    // Another pull request, or a later review of this one, has nothing carried over.
+    expect((await readCodeReviewOutcomeState(repo, 72)).carryovers).toEqual([]);
+    const later = await reviewed(71, 'c');
+    expect((await readCodeReviewOutcomeState(repo, 71, { reviewId: later.id })).carryovers).toEqual([]);
   });
 
   it('computes the outcome from the review that was named, also when its row has no pull request yet', async () => {

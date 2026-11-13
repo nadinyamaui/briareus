@@ -14,6 +14,7 @@ const store = vi.hoisted(() => ({
   decisions: [],
   count: null,
   rounds: [],
+  carryovers: [],
   at: 0,
   // Set by a test to make the next write of that kind fail, as a database that is down.
   failing: {},
@@ -39,6 +40,7 @@ const store = vi.hoisted(() => ({
       decisions: store.decisions,
       count: store.count,
       rounds: store.rounds,
+      carryovers: store.carryovers,
     };
   },
 }));
@@ -94,6 +96,10 @@ vi.mock('../lib/db.js', () => ({
     return { ...state, row: { ...store.row } };
   }),
   getCodeReviewOutcome: vi.fn(async () => (store.row ? { ...store.row } : null)),
+  saveCodeReviewCarryover: vi.fn(async (c) => {
+    if (!store.carryovers.some((k) => k.codeReviewId === c.codeReviewId && k.headSha === c.headSha))
+      store.carryovers.push({ ...c });
+  }),
   markCodeReviewOutcomeStale: vi.fn(async () => {
     store.fail('stale');
     if (store.row) store.row.recomputeAt ||= store.now();
@@ -213,6 +219,8 @@ function reviewed(sha = head, over = {}) {
 // Each test gets its own copy of the modules: lib/github.js keeps rate-limit cooldowns
 // and lib/review-enforcement.js its publication queue at module level.
 let enforcement, github, requests, answers, carried;
+// What GitHub answers to a comparison, by its `base...head`: the files it changes.
+let compares;
 const answer = (status, body = {}, headers = {}) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } });
 // Every status write GitHub was sent, in order.
@@ -240,9 +248,11 @@ beforeEach(async () => {
     decisions: [],
     count: null,
     rounds: [],
+    carryovers: [],
     at: 0,
     failing: {},
   });
+  compares = {};
   vi.clearAllMocks();
   vi.resetModules();
   requests = [];
@@ -268,6 +278,9 @@ beforeEach(async () => {
         body: init.body ? JSON.parse(init.body) : null,
       });
       if (init.method === 'GET') {
+        const compared = /\/compare\/(.+)$/.exec(url)?.[1];
+        if (compared)
+          return compares[compared] ? answer(200, { files: compares[compared] }) : answer(404, {});
         const sha = /\/commits\/([0-9a-f]+)\/statuses/.exec(url)?.[1];
         return sha ? answer(200, carried.get(sha) || []) : answer(404, {});
       }
@@ -1386,6 +1399,84 @@ describe('a pull request seen at another revision', () => {
     expect(carried.get(next)[0]).toMatchObject({ state: 'pending' });
     // A sighting that names no base branch says nothing about it.
     expect(await note({ headSha: next })).toBeNull();
+  });
+
+  describe('rebased onto the same change', () => {
+    const base = 'c'.repeat(40);
+    const file = (patch) => [{ filename: 'lib/cart.js', status: 'modified', sha: 'f1', patch }];
+    beforeEach(() => {
+      reviewed();
+      store.rounds = [
+        { id: 1, round: 1, headSha: head, baseRef: 'main', mergeBaseSha: base, status: 'completed' },
+      ];
+      compares[`${base}...${head}`] = file('@@ -10,2 +10,3 @@ total\n a\n+b\n c');
+    });
+
+    it('carries the review over to the new head, which GitHub then shows as passed', async () => {
+      // Lines moved by what the base gained above the change: the same change.
+      compares[`trunk...${next}`] = file('@@ -40,2 +40,3 @@ total\n a\n+b\n c');
+      await refresh(on);
+      const rebased = await note({ headSha: next, baseRef: 'trunk' });
+      expect(rebased.outcome).toMatchObject({
+        outcome: 'passed',
+        stale: false,
+        headSha: next,
+        baseRef: 'trunk',
+      });
+      expect(rebased.outcome.reasons[0]).toMatchObject({ code: 'carried_over', reviewedHeadSha: head });
+      expect(store.carryovers).toEqual([
+        expect.objectContaining({ codeReviewId: 5, reviewedSha: head, headSha: next, baseRef: 'trunk' }),
+      ]);
+      expect(carried.get(next)[0]).toMatchObject({
+        state: 'success',
+        description: 'Review passed at bbbbbbb: no findings',
+      });
+      // A later push that changes the code is a new change again.
+      const third = 'd'.repeat(40);
+      compares[`trunk...${third}`] = file('@@ -40,2 +40,3 @@ total\n a\n+B\n c');
+      expect((await note({ headSha: third, baseRef: 'trunk' })).outcome).toMatchObject({
+        outcome: 'pending',
+        stale: true,
+      });
+      expect(store.carryovers).toHaveLength(1);
+    });
+
+    it('carries over to a head the stored outcome already read as stale', async () => {
+      await refresh(on);
+      // First seen while GitHub could not compare: stale, and asked again next time.
+      expect((await note({ headSha: next, baseRef: 'trunk' })).outcome.stale).toBe(true);
+      compares[`trunk...${next}`] = file('@@ -40,2 +40,3 @@ total\n a\n+b\n c');
+      const again = await note({ headSha: next, baseRef: 'trunk' });
+      expect(again.outcome).toMatchObject({ outcome: 'passed', stale: false, headSha: next });
+      expect(carried.get(next)[0]).toMatchObject({ state: 'success' });
+      // Settled: nothing more to read or write for it.
+      const before = requests.length;
+      expect(await note({ headSha: next, baseRef: 'trunk' })).toBeNull();
+      expect(requests).toHaveLength(before);
+    });
+
+    it('asks GitHub once about a revision that makes another change', async () => {
+      compares[`main...${next}`] = file('@@ -10,2 +10,3 @@ total\n a\n+B\n c');
+      await refresh(on);
+      expect((await note({ headSha: next, baseRef: 'main' })).outcome.stale).toBe(true);
+      const comparisons = () => requests.filter((r) => r.url.includes('/compare/')).length;
+      expect(comparisons()).toBe(2);
+      expect(await note({ headSha: next, baseRef: 'main' })).toBeNull();
+      expect(await note({ headSha: next })).toBeNull();
+      expect(comparisons()).toBe(2);
+    });
+
+    it('stays stale when the change differs, GitHub cannot say, or the merge base is unknown', async () => {
+      compares[`main...${next}`] = file('@@ -10,2 +10,3 @@ total\n a\n+b\n c\n+d');
+      await refresh(on);
+      expect((await note({ headSha: next, baseRef: 'main' })).outcome.stale).toBe(true);
+      // No comparison at all: GitHub answers 404.
+      expect((await note({ headSha: 'e'.repeat(40), baseRef: 'main' })).outcome.stale).toBe(true);
+      store.rounds[0].mergeBaseSha = null;
+      compares[`main...${'f'.repeat(40)}`] = file('@@ -10,2 +10,3 @@ total\n a\n+b\n c');
+      expect((await note({ headSha: 'f'.repeat(40), baseRef: 'main' })).outcome.stale).toBe(true);
+      expect(store.carryovers).toEqual([]);
+    });
   });
 
   it('does nothing for a pull request no review has a record of, or for no revision at all', async () => {
