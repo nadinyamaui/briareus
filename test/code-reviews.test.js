@@ -142,6 +142,15 @@ describe('the prompts of a review kept off GitHub', () => {
     const computed = reviewLabelPrompt({ ...label, outcome: { outcome: 'changes_required', reasons: [] } });
     writesNothing(computed);
     expect(computed).toContain('**changes required**');
+    // A required security pass that did not pass is still reported, as for a posting review.
+    const owed = reviewLabelPrompt({
+      ...label,
+      securityOwed: { result: 'failed', reasons: [{ message: 'Injection in /login is a required fix' }] },
+    });
+    writesNothing(owed);
+    expect(owed).toContain('Briareus does not read that pass as passed: it failed on a required fix');
+    expect(owed).toContain('- Injection in /login is a required fix');
+    expect(owed).toContain('whatever the findings say: report this.');
   });
 });
 

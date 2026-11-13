@@ -1587,10 +1587,14 @@ describe('reconcileFinding', () => {
       expect(
         quietlyRefused({ reconciliation: 'adopted', priorFindingRef: 'r-fix', revisitReason: 'x' }).message,
       ).toContain('revisitReason goes with');
-      // A review that posts never adopts a claim without a thread: it posts it again.
-      expect(refused({ reconciliation: 'adopted', priorFindingRef: 'r-fix' }).message).toContain(
-        'only an unresolved thread',
-      );
+      // A review that posts adopts it too, so a fix left by a private review is cleared
+      // once the project posts again instead of standing as owed for ever.
+      expect(place({ reconciliation: 'adopted', priorFindingRef: 'r-fix' })).toMatchObject({
+        reconciliation: 'adopted',
+        findingRef: 'r-fix',
+        priorThreadId: null,
+        priorDisposition: 'fix',
+      });
     });
 
     it('refuses a finding that names a comment, since nothing may have been posted', () => {
