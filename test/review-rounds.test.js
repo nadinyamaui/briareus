@@ -177,13 +177,13 @@ beforeEach(() => {
 });
 
 describe('the project limit', () => {
-  it('is three unless the project says otherwise, and 0 means none', () => {
-    expect(DEFAULT_ROUND_LIMIT).toBe(3);
+  it('is ten unless the project says otherwise, and 0 means none', () => {
+    expect(DEFAULT_ROUND_LIMIT).toBe(10);
     expect(roundLimitOf({ reviewRoundLimit: 5 })).toBe(5);
     expect(roundLimitOf({ reviewRoundLimit: 0 })).toBe(0);
     // A row from before the setting, or a broken value, is bounded rather than not.
     for (const project of [null, {}, { reviewRoundLimit: -1 }, { reviewRoundLimit: '4' }])
-      expect(roundLimitOf(project)).toBe(3);
+      expect(roundLimitOf(project)).toBe(10);
   });
 });
 

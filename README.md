@@ -236,7 +236,7 @@ and database are released; the stored review and the PR comments remain.
 
 Reviewing one pull request again and again is bounded: each review of a new
 revision is a round, and a project allows `reviewRoundLimit` of them per pull
-request (3 by default, 0 for no limit), counted across all its commits. The
+request (10 by default, 0 for no limit), counted across all its commits. The
 first round reviews the whole PR; later ones review what changed since, the
 findings still outstanding and what those changes affect, or the whole PR again
 when the change calls for it. At the limit no further review starts until a

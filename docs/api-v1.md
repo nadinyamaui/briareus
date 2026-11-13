@@ -351,7 +351,7 @@ See [mailbox setup](../README.md#mail) and [email from a session](email-mcp.md).
 ## Review rounds per pull request
 
 Reviews are bounded per pull request. Every review of a new revision uses one
-of the project’s `reviewRoundLimit` rounds (3 by default, 0 for no limit), counted
+of the project’s `reviewRoundLimit` rounds (10 by default, 0 for no limit), counted
 across all the pull request’s commits and never reset by a push. Once they are used,
 orchestrator sessions start no further review, and
 `POST /actions` with `action: "review"` answers 409 with

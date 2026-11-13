@@ -245,7 +245,7 @@ describing a finding's reconciliation are read-only for clients.
 
 Reviewing a pull request again after every push is bounded. Each review of a
 new revision is a **round**, counted per pull request across all its commits,
-and a project allows `reviewRoundLimit` of them (3 by default). The flow of a
+and a project allows `reviewRoundLimit` of them (10 by default). The flow of a
 review stays discover, publish, verify, label, the discovery is still the
 provider's own review command, and the project's provider, model and effort are
 used as configured; rounds only decide whether a review starts and what it
@@ -375,7 +375,7 @@ they give the stored state and name the round it is as of.
 
 **Setting.** `reviewRoundLimit` on the project: a whole number from 1 to 20, or
 0 for no limit, in which case rounds are still counted and scoped but never
-refused. Null or an empty value on a write resets it to 3; it never means "no
+refused. Null or an empty value on a write resets it to 10; it never means "no
 limit".
 
 **Migration.** `2026_11_10_130000_add_code_review_rounds` adds
@@ -383,7 +383,8 @@ limit".
 continuations and the refusal that waits), `code_review_rounds` (one row per
 round), the `round`, `scope`, `scope_reason` and `scope_base_sha` columns on
 `code_reviews`, and `review_round_limit` on `projects`, 3 for every existing
-project. Counting starts when it runs: reviews stored before it are not turned
+project. `2026_11_13_120000_raise_review_round_limit_default` then
+raises the default to 10 and moves every project still at 3 to 10. Counting starts when it runs: reviews stored before it are not turned
 into rounds, so an open pull request's next review is its round one and reviews
 the whole pull request. A review session in flight during the upgrade claims its
 round at its next discovery; one already past discovery finishes without one.
@@ -1493,7 +1494,7 @@ These additions are present in the server revision documented here:
   pull request through the API. What the reviews of a pull request decided is
   kept per pull request and outlives the reviews and their sessions.
 - Code reviews of one pull request are bounded by a per-project round limit
-  (`reviewRoundLimit`, 3 by default); later rounds review what changed, and a
+  (`reviewRoundLimit`, 10 by default); later rounds review what changed, and a
   person continues past the limit explicitly.
 - A pull request's review outcome (pending, incomplete, changes required or
   passed) is computed by the server from recorded stages, findings and

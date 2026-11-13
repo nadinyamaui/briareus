@@ -157,11 +157,11 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('code review rounds on My
     );
     const [rows] = await pool.query("SELECT `id` FROM `projects` WHERE `repo` = 'acme/legacy'");
     const legacy = await getProjectRow(rows[0].id);
-    expect(legacy.reviewRoundLimit).toBe(3);
+    expect(legacy.reviewRoundLimit).toBe(10);
     expect((await saveProject({ ...legacy, reviewRoundLimit: 5 })).reviewRoundLimit).toBe(5);
     expect((await saveProject({ ...legacy, reviewRoundLimit: 0 })).reviewRoundLimit).toBe(0);
     const created = await saveProject({ repo: 'acme/new', label: 'New', enabled: true });
-    expect(created.reviewRoundLimit).toBe(3);
+    expect(created.reviewRoundLimit).toBe(10);
   });
 
   it('claims a round per revision and keeps a retry on the round it had', async () => {
