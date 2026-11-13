@@ -1326,7 +1326,8 @@ there and closes them again, so it is refused on any other project.
   before the next, so a run the server picks up after a restart neither opens a
   second pull request nor starts a second review; a review that has not ended
   within six hours is given up on. A run records the runtime it started under
-  and the review configuration (the server's commit, `securityReview`,
+  and the review configuration (the server's commit, null when it cannot be
+  read, as in the container image, which has no `.git`; `securityReview`,
   `enforceReviewOutcome`, `reviewRoundLimit`, fingerprints of the approval
   policy and the label template). To evaluate a
   prompt, tool or runtime change, run once before it and once after: a run takes
@@ -1353,7 +1354,8 @@ there and closes them again, so it is refused on any other project.
   number of findings is never a score.
 - **Comparing** (`GET /review-benchmarks/compare?a=&b=`) puts two runs side by
   side on the cases both ran against the same answer, with the defects each
-  caught that the other did not.
+  caught that the other did not. It calls two runs alike only when both
+  recorded the server's commit.
 
 **Review quality** (`GET /review-quality?repo=&days=`) describes a project's
 reviews over a window from what the server already keeps, and is not a verdict

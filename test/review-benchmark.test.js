@@ -409,7 +409,7 @@ describe('summarizeRun and compareRuns', () => {
 
   it('calls two runs alike only when their reviews ran on the same runtime too', () => {
     const run = (id, results) => ({
-      run: { id, label: null, runtime: { model: 'a' }, configuration: {} },
+      run: { id, label: null, runtime: { model: 'a' }, configuration: { coreRevision: 'abc' } },
       results,
     });
     const alike = compareRuns(
@@ -422,5 +422,16 @@ describe('summarizeRun and compareRuns', () => {
       run(2, [result('x', clean, review([], { model: 'sonnet' }))]),
     );
     expect(mixed.caveats.join('\n')).not.toContain('same runtime and review configuration');
+  });
+
+  it('never calls two runs alike when the server could not read its commit', () => {
+    const run = (id) => ({
+      run: { id, label: null, runtime: { model: 'a' }, configuration: { coreRevision: null } },
+      results: [result('x', clean, review([]))],
+    });
+    const c = compareRuns(run(1), run(2));
+    const text = c.caveats.join('\n');
+    expect(text).not.toContain('same runtime and review configuration');
+    expect(text).toContain('commit is unknown');
   });
 });
