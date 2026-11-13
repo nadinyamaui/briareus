@@ -178,6 +178,7 @@ describe('fetchReviewThreads', () => {
           path: 'lib/stock.js',
           line: null,
           originalLine: 42,
+          originalStartLine: 39,
           startLine: 40,
         }),
       ]),
@@ -191,6 +192,8 @@ describe('fetchReviewThreads', () => {
         path: 'lib/stock.js',
         line: 42,
         startLine: 40,
+        originalLine: 42,
+        originalStartLine: 39,
         comments: [
           {
             id: 1,
