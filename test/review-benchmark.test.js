@@ -375,6 +375,15 @@ describe('summarizeRun and compareRuns', () => {
     expect(text).toContain('2 different runtimes');
   });
 
+  it('times only the reviews that ended, and still counts what a timed-out one spent', () => {
+    const s = summarizeRun([
+      result('a', clean, review([], { startedAt: 0, endedAt: 600_000 })),
+      result('b', clean, review([], { status: 'running', startedAt: 0, endedAt: 21_600_000 }), 'failed'),
+    ]);
+    expect(s.durationMs).toEqual({ median: 600_000, total: 600_000 });
+    expect(s.cost.usd).toBe(3);
+  });
+
   it('compares the cases both runs scored against the same answer', () => {
     const changed = { ...clean, hash: 'other' };
     const a = {

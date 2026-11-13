@@ -1312,8 +1312,8 @@ there and closes them again, so it is refused on any other project.
   `agree` or `disagree`), and while nobody disagrees: `standing.status`
   `adjudicated`. An adjudication is of the case's `answerHash`, the fingerprint
   of the change and the answer, so editing the case (`PUT`) leaves the earlier
-  verdicts about another answer and the case is a `draft` again. Cases are
-  retired, never deleted.
+  verdicts about another answer, makes the editor its author, and the case is a
+  `draft` again. Cases are retired, never deleted.
 - **A run** (`POST /review-benchmarks/runs`) takes every adjudicated case, or
   the ones named, and puts each through the real review, a few at once
   (`concurrency`, 1 to 5): two branches at its commits under neutral names

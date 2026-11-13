@@ -130,8 +130,22 @@ describe.skipIf(process.env.CODE_REVIEW_MYSQL !== '1')('the review benchmark on 
     expect(read.adjudications).toHaveLength(1);
     expect(caseStanding(read, read.adjudications).status).toBe('disputed');
     // An edit moves the fingerprint: the earlier verdict is about another answer.
-    const edited = await store.updateCase(repo, created.id, caseOf('cache', { kind: 'clean', defects: [] }));
+    // Only the provenance changes: the answer and its author stay.
+    const noted = await store.updateCase(
+      repo,
+      created.id,
+      caseOf('cache', { provenance: 'From the incident log' }),
+      {
+        userId: 4,
+      },
+    );
+    expect(noted).toMatchObject({ answerHash: read.answerHash, authoredBy: 1 });
+    const edited = await store.updateCase(repo, created.id, caseOf('cache', { kind: 'clean', defects: [] }), {
+      userId: 4,
+    });
     expect(edited.answerHash).not.toBe(read.answerHash);
+    // Whoever changed the answer is its author now.
+    expect(edited.authoredBy).toBe(4);
     expect(caseStanding(edited, edited.adjudications)).toMatchObject({ status: 'draft', outdated: 1 });
     await store.adjudicate(repo, created.id, { userId: 3, verdict: 'agree' });
     expect((await store.getCase(repo, created.id)).adjudications).toHaveLength(2);

@@ -1,5 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import express from 'express';
+import { asGithubUser, githubRest } from '../lib/github.js';
 import { reviewBenchmarkRoutes } from '../lib/review-benchmark-routes.js';
 import { answerHash } from '../lib/review-benchmark.js';
 
@@ -53,10 +54,14 @@ function memoryStore() {
       cases.push(row);
       return copy(row);
     },
-    async updateCase(r, id, c) {
+    async updateCase(r, id, c, { userId }) {
       const row = cases.find((x) => x.repo === r && x.id === id);
       if (!row) throw missing();
-      Object.assign(row, c, { answerHash: answerHash(c) });
+      const hash = answerHash(c);
+      Object.assign(row, c, {
+        answerHash: hash,
+        authoredBy: hash === row.answerHash ? row.authoredBy : userId,
+      });
       return copy(row);
     },
     async retireCase(r, id, retired) {
@@ -126,13 +131,15 @@ function memoryStore() {
 }
 
 describe('the review benchmark routes', () => {
-  let server, base, store, project, user, ticks, cancelled, qualityAsked;
+  let server, base, store, project, user, ticks, onTick, actingToken, cancelled, qualityAsked;
 
   beforeEach(async () => {
     store = memoryStore();
     project = { repo, reviewBenchmark: true, securityReview: 'off' };
     user = { id: 1, name: 'Ana' };
     ticks = 0;
+    onTick = null;
+    actingToken = null;
     cancelled = [];
     qualityAsked = [];
     const app = express();
@@ -140,14 +147,18 @@ describe('the review benchmark routes', () => {
     // What the gateway (lib/api-v1.js) leaves for a handler: the user, and no credential.
     app.use((req, res, next) => {
       if (user) res.locals.apiUser = user;
-      next();
+      // A user who linked their own GitHub token acts as it (lib/api-v1.js actAs).
+      asGithubUser(actingToken, next);
     });
     app.use(
       reviewBenchmarkRoutes({
         getProject: (r) => (r === repo ? project : null),
         store,
         runner: {
-          tick: async () => ticks++,
+          tick: async () => {
+            ticks++;
+            if (onTick) await onTick();
+          },
           cancelled: async (run) => cancelled.push(run.id),
         },
         runSettings: () => ({
@@ -235,6 +246,19 @@ describe('the review benchmark routes', () => {
     );
     expect(edited.body.case.standing).toMatchObject({ status: 'draft', outdated: 2 });
     expect(edited.body.case.key).toBe('cache');
+    // Whoever changed the answer is its author now: their own agreement adjudicates nothing.
+    expect(edited.body.case.authoredBy).toBe(2);
+    const editor = await call('POST', `/api/review-benchmarks/cases/${id}/adjudications`, {
+      repo,
+      verdict: 'agree',
+    });
+    expect(editor.body.case.standing).toMatchObject({ status: 'draft', runnable: false });
+    user = { id: 1 };
+    const original = await call('POST', `/api/review-benchmarks/cases/${id}/adjudications`, {
+      repo,
+      verdict: 'agree',
+    });
+    expect(original.body.case.standing).toMatchObject({ status: 'adjudicated', runnable: true });
   });
 
   it('refuses invalid cases, a duplicate key and unknown projects', async () => {
@@ -278,6 +302,31 @@ describe('the review benchmark routes', () => {
     // One run at a time.
     const again = await call('POST', '/api/review-benchmarks/runs', { repo });
     expect(again).toMatchObject({ status: 409, body: { code: 'run_in_progress' } });
+  });
+
+  it('runs the tick a request starts as the server, not as the requesting user', async () => {
+    await adjudicated();
+    const sent = [];
+    let ticked;
+    const done = new Promise((resolve) => (ticked = resolve));
+    const realFetch = globalThis.fetch;
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation((url, init) => {
+      if (!String(url).startsWith('https://api.github.com')) return realFetch(url, init);
+      sent.push(init.headers.Authorization);
+      return Promise.resolve(new Response('{}', { status: 201 }));
+    });
+    try {
+      onTick = async () => {
+        await githubRest({ githubToken: 'SERVER' }, 'POST', `/repos/${repo}/git/refs`, { ref: 'x' });
+        ticked();
+      };
+      actingToken = 'USER-A';
+      expect((await call('POST', '/api/review-benchmarks/runs', { repo })).status).toBe(201);
+      await done;
+    } finally {
+      spy.mockRestore();
+    }
+    expect(sent).toEqual(['Bearer SERVER']);
   });
 
   it('refuses a run the project or its cases are not fit for', async () => {
