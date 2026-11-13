@@ -20215,6 +20215,36 @@ describe('automatic recovery after a server restart', () => {
     expect(children).toHaveLength(0);
   });
 
+  it('reports why an existing-PR sheet writer stopped without posting to the QA host', async () => {
+    const parent = row({ status: 'idle', recoveryTurn: null });
+    const saved = row({
+      qaBranch: 'feature',
+      qaRunId: 'fresh-qa',
+      qaParentId: parent.id,
+      startedOnPr: 132,
+      autoClose: true,
+      recoveryTurn: { prompt: 'Prepare the sheet for the existing PR', phase: 'initial', completed: false },
+    });
+    parent.qaLoop = { running: true, sessionId: saved.id, done: false };
+    latestTestVerdict.mockResolvedValueOnce({ failures: [], passed: 0, incomplete: true });
+    state.stored = [parent, saved];
+    await initJobs();
+    resumeRestartedSessions();
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    children[0].notify('item/completed', {
+      item: { type: 'agent_message', text: 'Stopped as instructed. No test sheet or labels changed.' },
+    });
+    finish(children[0]);
+    await vi.waitFor(() => expect(saved.status).toBe('failed'));
+    expect(saved.error).toContain(
+      'Sheet writer’s last reply: Stopped as instructed. No test sheet or labels changed.',
+    );
+    expect(parent.qaLoop.failure).toMatchObject({ kind: 'failed', reason: saved.error });
+    expect(saved.qaExecutionComplete).not.toBe(true);
+    expect(parent.qaLoop.done).toBe(false);
+    expect(children).toHaveLength(1);
+  });
+
   it('retries a transient GitHub error before executing a fresh QA run, and tolerates a failed label removal', async () => {
     const saved = row({
       qaBranch: 'feature',
