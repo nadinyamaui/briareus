@@ -12,6 +12,20 @@ vi.mock('../lib/prtasks.js', () => ({
   prBodyPrompt: vi.fn(() => 'BODY'),
 }));
 
+// The private self-review's open fixes come from the database; only whether they reach
+// the prompt is this file's to check (lib/review-private.js is tested on its own).
+const note = vi.hoisted(() => ({
+  text: /** @type {string | null} */ (null),
+  calls: /** @type {any[]} */ ([]),
+}));
+vi.mock('../lib/review-private.js', () => ({
+  privateSelfReviewOf: (project) => project?.privateSelfReview === true,
+  privateFeedbackNote: async (repo, prNumber) => {
+    note.calls.push([repo, prNumber]);
+    return note.text;
+  },
+}));
+
 import { getAction, listActions, actionSessionSpec } from '../lib/actions.js';
 import * as prtasks from '../lib/prtasks.js';
 
@@ -180,6 +194,29 @@ describe('implement-feedback', () => {
       branch: 'feat',
       project,
     });
+  });
+
+  it('reads no private findings for a project that does not keep its self-review private', async () => {
+    note.calls = [];
+    note.text = 'PRIVATE';
+    const prompt = await action.prompt({ repo: 'acme/shop', prNumber: 5, branch: 'feat', project: {} });
+    expect(prompt).toBe('FEEDBACK');
+    expect(note.calls).toEqual([]);
+  });
+
+  it('adds the private self-review’s open fixes after the template, when there are any', async () => {
+    note.calls = [];
+    const project = { repo: 'acme/shop', privateSelfReview: true };
+    note.text = 'PRIVATE FIXES';
+    expect(await action.prompt({ repo: 'acme/shop', prNumber: 5, branch: 'feat', project })).toBe(
+      'FEEDBACK\n\nPRIVATE FIXES',
+    );
+    note.text = null;
+    expect(await action.prompt({ repo: 'acme/shop', prNumber: 5, branch: 'feat', project })).toBe('FEEDBACK');
+    expect(note.calls).toEqual([
+      ['acme/shop', 5],
+      ['acme/shop', 5],
+    ]);
   });
 
   it('titles the session after that pull request', () => {

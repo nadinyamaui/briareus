@@ -1498,6 +1498,47 @@ describe('reconcileFinding', () => {
     ).toContain('revisitReason goes with');
   });
 
+  // A private self-review's claims never get a thread, so a required fix it left would
+  // stand as owed for ever unless a later round could rule on it again.
+  it('lets a private self-review adopt an earlier fix that has no thread, and nothing else may', () => {
+    const privately = (input) => reconcileFinding(held, input, { ...review, privately: true });
+    expect(privately({ reconciliation: 'adopted', priorFindingRef: 'r-fix' })).toMatchObject({
+      reconciliation: 'adopted',
+      findingRef: 'r-fix',
+      priorThreadId: null,
+      priorDisposition: 'fix',
+    });
+    const adopted = privately({ reconciliation: 'adopted', priorFindingRef: 'r-fix' });
+    expect(adopted.threadId).toBeUndefined();
+    expect(adopted.commentId).toBeUndefined();
+    // The ordinary review still adopts only an unresolved thread.
+    expect(refused({ reconciliation: 'adopted', priorFindingRef: 'r-fix' }).message).toContain(
+      'only an unresolved thread',
+    );
+    const refusedPrivately = (input) => {
+      try {
+        privately(input);
+      } catch (e) {
+        return e.message;
+      }
+      return null;
+    };
+    // A dismissal is settled: suppressed, not adopted, private or not.
+    expect(refusedPrivately({ reconciliation: 'adopted', priorFindingRef: 'r-none' })).toContain(
+      'only an unresolved thread',
+    );
+    expect(refusedPrivately({ reconciliation: 'adopted', priorFindingRef: 'r-fix', commentId: 9 })).toContain(
+      'posts nothing',
+    );
+    expect(
+      refusedPrivately({ reconciliation: 'adopted', priorFindingRef: 'r-fix', revisitReason: 'x' }),
+    ).toContain('revisitReason goes with');
+    // Threads are adopted as they always were.
+    expect(privately({ reconciliation: 'adopted', priorThreadId: 'T_fix' })).toMatchObject({
+      threadId: 'T_fix',
+    });
+  });
+
   it('reopens a decided claim only with what changed', () => {
     expect(
       place({

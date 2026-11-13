@@ -413,6 +413,20 @@ describe('enforcing the code review outcome', () => {
   });
 });
 
+describe('keeping the review of the project’s own pull requests private', () => {
+  it('is off until switched on with a real boolean, and stays as set', async () => {
+    const saved = await createProject({ ...base });
+    expect(saved.privateSelfReview).toBe(false);
+    expect((await updateProject(saved.id, { privateSelfReview: true })).privateSelfReview).toBe(true);
+    expect((await updateProject(saved.id, { label: 'Renamed' })).privateSelfReview).toBe(true);
+    for (const bad of ['true', 1, null, ''])
+      await expect(updateProject(saved.id, { privateSelfReview: bad })).rejects.toThrow(
+        'privateSelfReview must be true or false',
+      );
+    expect((await updateProject(saved.id, { privateSelfReview: false })).privateSelfReview).toBe(false);
+  });
+});
+
 describe('setting a project aside for the review benchmark', () => {
   it('is off until switched on with a real boolean, and stays as set', async () => {
     const saved = await createProject({ ...base });

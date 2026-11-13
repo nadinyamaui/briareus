@@ -196,6 +196,7 @@ import {
   setInboxOwner,
   DEV_OPEN,
   closeDevSessionWithReason,
+  codeReviewIsPrivate,
 } from './lib/jobs.js';
 import {
   getBinary,
@@ -833,6 +834,9 @@ api.use(
     // pass the server saw complete on the head it reviews, and publishes a finding of
     // that pass only if the coverage kept with it lists one.
     securityPass: async (review) => securityCoverageOf(await listCodeReviewStages(review.id), review.headSha),
+    // A private self-review may adopt an earlier claim that has no thread, as decided
+    // for the session's run when its discovery started.
+    privately: (review) => codeReviewIsPrivate(getJob(review.jobId)),
     refresh: async (review) => {
       const project = getProject(review.repo);
       if (project) await refreshReviewOutcome(project, review.prNumber, { cfg: getConfig() });

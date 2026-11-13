@@ -16,6 +16,7 @@ import {
   reviewScopePrompt,
   reviewSecurityPrompt,
   reviewSecurityRetryPrompt,
+  reviewSelfFinishPrompt,
   reviewVerifyPrompt,
 } from '../lib/code-reviews.js';
 import { findingRefFor, forgetReviewHistory, loadReviewHistory } from '../lib/review-history.js';
@@ -257,6 +258,117 @@ describe('review verification prompt', () => {
       'Start every reply with the verdict in bold (**Fix**, **Optional**, or **Dismissed**)',
     );
     expect(prompt).toContain('Dismissed: after replying, resolve the thread');
+  });
+});
+
+// A private self-review (lib/review-private.js) runs the same steps and keeps every
+// finding off GitHub: these are the differences, and the ordinary prompts stay as they were.
+describe('a private self-review in the prompts', () => {
+  const head = 'a'.repeat(40);
+  const history = { path: '/tmp/history.json', threads: 2, withoutThread: 1 };
+  const publish = reviewPublishPrompt({ repo: 'acme/shop', prNumber: 7, head, history, privately: true });
+
+  it('registers and stores the findings and posts nothing of them', () => {
+    expect(publish).toContain('Register the review above of acme/shop PR #7');
+    expect(publish).toContain('Post nothing on GitHub in this step');
+    expect(publish).toContain('store it with review_summary_set. It stays on the server: do not post it');
+    expect(publish).toContain('Leave shouldFix, verification and commentId unset');
+    expect(publish).not.toContain('gh api repos/acme/shop/pulls/7/comments');
+    expect(publish).not.toContain('reviewer:code-review');
+    expect(publish).not.toContain('add each finding as an inline review comment');
+  });
+
+  it('reconciles with the earlier decisions without replying in their threads', () => {
+    expect(publish).toContain('Before registering anything, reconcile each finding');
+    expect(publish).toContain('an earlier decision without a thread that is `fix` or `optional`');
+    expect(publish).toContain(
+      'register every earlier decision without a thread whose disposition is `fix` as adopted',
+    );
+    expect(publish).not.toContain('make it visible in its thread');
+    expect(publish).toContain('and no commentId');
+  });
+
+  it('finds what an interrupted attempt registered in the review itself', () => {
+    expect(publish).toContain(
+      'call review_findings_list first, and register no finding that is already listed',
+    );
+    expect(publish).not.toContain('raisedOnThisHead');
+  });
+
+  it('keeps a security pass’s findings in the stored summary only', () => {
+    const security = { path: '/tmp/security.json', findings: 1 };
+    const secured = reviewPublishPrompt({ repo: 'acme/shop', prNumber: 7, head, security, privately: true });
+    expect(secured).toContain('reconcile and register each of them');
+    expect(secured).not.toContain('its inline comment starts the same way');
+    const failed = reviewPublishPrompt({
+      repo: 'acme/shop',
+      prNumber: 7,
+      head,
+      securityFailed: true,
+      privately: true,
+    });
+    expect(failed).toContain('register a concrete defect it described');
+    expect(failed).not.toContain('posted and registered');
+    // The published review says what it always did.
+    expect(reviewPublishPrompt({ repo: 'acme/shop', prNumber: 7, head, security })).toContain(
+      'reconcile, post and register each of them',
+    );
+  });
+
+  it('verifies the same way and replies to nothing, ruling again on its own earlier fixes', () => {
+    const verify = reviewVerifyPrompt({ privately: true });
+    expect(verify).toContain('Your goal is to try to REFUTE them');
+    expect(verify).toContain('no reply in any thread');
+    expect(verify).toContain(
+      'record Dismissed with verification confirmed and comments starting with `Fixed since:`',
+    );
+    expect(verify).not.toContain('Start every reply with the verdict in bold');
+    expect(verify).not.toContain('resolveReviewThread');
+    // Shared from the ordinary step, with nothing added to the ordinary one.
+    expect(reviewVerifyPrompt({ privately: true, enforced: true })).toContain(
+      'Briareus computes this review',
+    );
+    expect(reviewVerifyPrompt()).not.toContain('Fixed since:');
+  });
+
+  it('finishes by the project’s rules and never approves', () => {
+    const finish = reviewSelfFinishPrompt({ finish: 'CUSTOM FINISH RULES', head });
+    expect(finish).toContain('CUSTOM FINISH RULES');
+    expect(finish).toContain(
+      `Discovery, registration and independent verification must all have succeeded for ${head}`,
+    );
+    expect(finish).toContain('change nothing on the pull request and post nothing');
+    expect(finish.indexOf('post nothing')).toBeLessThan(finish.indexOf('CUSTOM FINISH RULES'));
+    expect(finish).toContain('It never approves the pull request, submits no review on GitHub');
+    expect(finish).toContain('never paste the review');
+    expect(finish).not.toContain('event=APPROVE');
+  });
+
+  it('is held to the computed outcome and a required security pass', () => {
+    const changes = reviewSelfFinishPrompt({
+      finish: 'rules',
+      head,
+      outcome: {
+        outcome: 'changes_required',
+        reasons: [{ effect: 'changes_required', message: '"X" is a required fix.' }],
+      },
+    });
+    expect(changes).toContain('**changes required**');
+    expect(changes).toContain('- "X" is a required fix.');
+    expect(changes).toContain('for a review that left required fixes');
+    const incomplete = reviewSelfFinishPrompt({
+      finish: 'rules',
+      head,
+      outcome: { outcome: 'incomplete', reasons: [] },
+    });
+    expect(incomplete).toContain('leave the pull request exactly as it is, post nothing');
+    const owed = reviewSelfFinishPrompt({
+      finish: 'rules',
+      head,
+      securityOwed: { result: 'incomplete', reasons: [] },
+    });
+    expect(owed).toContain('The required security pass has not passed');
+    expect(owed).toContain('leave the pull request exactly as it is, post nothing');
   });
 });
 
@@ -873,7 +985,7 @@ describe('pullCodeReviewRoutes', () => {
 
 describe('findings reconciled with a pull request’s earlier threads', () => {
   const head = 'a'.repeat(40);
-  let server, base, findings, decisions, saved, store, failSave, readHistory;
+  let server, base, findings, decisions, saved, store, failSave, readHistory, privateReviews;
   const call = (token, method, path, body) =>
     fetch(`${base}/api/agent/code-review${path}`, {
       method,
@@ -915,6 +1027,7 @@ describe('findings reconciled with a pull request’s earlier threads', () => {
     decisions = [];
     saved = [];
     failSave = false;
+    privateReviews = new Set();
     let nextId = 0;
     const keep = (decide, finding, previous) => {
       const row = decide?.build(finding, previous);
@@ -1016,7 +1129,9 @@ describe('findings reconciled with a pull request’s earlier threads', () => {
       if (req.headers['x-user']) res.locals.apiUser = { id: Number(req.headers['x-user']) };
       next();
     });
-    app.use(codeReviewRoutes({ agentSession, store }));
+    app.use(
+      codeReviewRoutes({ agentSession, store, privately: (review) => privateReviews.has(review.jobId) }),
+    );
     app.use(pullCodeReviewRoutes({ getProject, store }));
     server = app.listen(0, '127.0.0.1');
     await new Promise((resolve) => server.once('listening', resolve));
@@ -1026,6 +1141,56 @@ describe('findings reconciled with a pull request’s earlier threads', () => {
     forgetReviewHistory('rev');
     githubGraphql.mockReset();
     await new Promise((resolve) => server.close(resolve));
+  });
+
+  // A private self-review keeps its claims without a thread; a later round of it adopts
+  // the required fix one left, and its new verdict is the claim's decision from then on.
+  it('lets a private self-review adopt its own earlier fix, which the ordinary review may not', async () => {
+    decisions.push({
+      repo: 'acme/shop',
+      prNumber: 12,
+      anchor: 'ref:priv-1',
+      threadId: null,
+      findingRef: 'priv-1',
+      verdict: 'fix',
+      rationale: 'Reproduced with a negative quantity.',
+      verification: 'confirmed',
+      title: 'Stock can go negative',
+      source: 'review',
+      decidedAt: new Date(Date.UTC(2026, 10, 1, 10)).toISOString(),
+    });
+    await readHistory();
+    const refused = await add({ reconciliation: 'adopted', priorFindingRef: 'priv-1' });
+    expect(refused.status).toBe(400);
+    expect(refused.json.error).toContain('only an unresolved thread');
+
+    privateReviews.add('rev');
+    const adopted = await add({ reconciliation: 'adopted', priorFindingRef: 'priv-1' });
+    expect(adopted.status).toBe(201);
+    expect(adopted.json.finding).toMatchObject({
+      reconciliation: 'adopted',
+      findingRef: 'priv-1',
+      priorDisposition: 'fix',
+    });
+    expect(adopted.json.finding.commentId ?? null).toBeNull();
+    expect(adopted.json.finding.threadId ?? null).toBeNull();
+    // A retried publish step adopting the same claim again answers the finding it has.
+    const again = await add({ reconciliation: 'adopted', priorFindingRef: 'priv-1' });
+    expect(again.status).toBe(200);
+    expect(again.json.finding.id).toBe(adopted.json.finding.id);
+    expect(findings).toHaveLength(1);
+    const fixed = await call('rev', 'PATCH', `/findings/${adopted.json.finding.id}`, {
+      shouldFix: 'dismiss',
+      verification: 'confirmed',
+      comments: 'Fixed since: lib/cart.js:12 clamps the quantity.',
+    });
+    expect(fixed.status).toBe(200);
+    expect(saved.at(-1)).toMatchObject({
+      anchor: 'ref:priv-1',
+      findingRef: 'priv-1',
+      verdict: 'dismiss',
+      verification: 'confirmed',
+    });
   });
 
   it('gives a posted finding its comment, the reviewed head and a stable reference', async () => {

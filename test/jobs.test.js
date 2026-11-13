@@ -2163,6 +2163,196 @@ describe('Claude code review with a security pass', () => {
   );
 });
 
+describe('Claude private self-review', () => {
+  // The same review on the same runtime: discovery is Claude's own /code-review, and the
+  // steps after it are told to keep everything off GitHub when, and only when, the
+  // project keeps its own pull requests' reviews private and this one is its own.
+  it.each([
+    ['keeps the findings of the project’s own pull request off GitHub', 'octo-dev', true],
+    ['publishes the review of somebody else’s pull request as it always did', 'outside-dev', false],
+  ])(
+    '%s',
+    async (_name, author, privately) => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'claude-private-'));
+      spawnSync('git', ['init', '-b', 'feature', root]);
+      spawnSync('git', [
+        '-C',
+        root,
+        '-c',
+        'user.name=Test',
+        '-c',
+        'user.email=test@example.com',
+        'commit',
+        '--allow-empty',
+        '-m',
+        'Fixture',
+      ]);
+      const head = spawnSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout.trim();
+      const configDir = path.join(root, 'claude-config');
+      fs.mkdirSync(configDir);
+      const home = vi.spyOn(providerTools, 'ensureClaudeHome').mockReturnValue(configDir);
+      const bin = vi
+        .spyOn(BINARIES.claude, 'bin')
+        .mockReturnValue({ bin: '/mock/review-agent', source: 'test' });
+      const id = `claude-private-review-${privately ? 'own' : 'other'}`;
+      const prompts = path.join(os.tmpdir(), 'reviewer-prompts');
+      const summaryPath = path.join(prompts, `${id}-review-summary.md`);
+      const realSpawn = spawn.getMockImplementation();
+      const invocations = [];
+      spawn.mockImplementation((cmd, args, opts) => {
+        if (cmd === 'git' && args.includes('fetch')) {
+          const git = new EventEmitter();
+          git.stdout = new PassThrough();
+          git.stderr = new PassThrough();
+          queueMicrotask(() => git.emit('close', 0));
+          return git;
+        }
+        if (cmd !== '/mock/review-agent') return realSpawn(cmd, args, opts);
+        const child = new EventEmitter();
+        if (args[1] === '/context') {
+          child.stdin = new PassThrough();
+          child.stdout = new PassThrough();
+          child.stderr = new PassThrough();
+          setImmediate(() => {
+            child.stdout.end();
+            child.emit('close', 0);
+          });
+          return child;
+        }
+        const invocation = { args, opts, child, prompt: null };
+        invocations.push(invocation);
+        child.stdin = new PassThrough();
+        child.stderr = new PassThrough();
+        if (args[args.indexOf('--output-format') + 1] === 'text') {
+          child.stdout = null;
+          child.writeReview = (bytes) => fs.appendFileSync(summaryPath, bytes);
+          return child;
+        }
+        child.stdout = new PassThrough();
+        child.stdin.on('data', (chunk) => {
+          invocation.prompt ??= JSON.parse(chunk.toString()).message.content;
+          child.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', result: 'done' }) + '\n');
+        });
+        child.stdin.on('finish', () => setImmediate(() => child.emit('close', 0)));
+        return child;
+      });
+      getProviderForJob.mockReturnValue(state.provider);
+      captureProviderAuth.mockResolvedValue(undefined);
+      githubRest.mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          number: 3748,
+          state: 'open',
+          user: { login: author },
+          head: { ref: 'feature', sha: head },
+          base: { ref: 'main' },
+          html_url: 'https://github.com/acme/shop/pull/3748',
+        }),
+      });
+      answerReviewThreads(head);
+      completeCodeReview.mockClear();
+      failCodeReview.mockClear();
+      completeCodeReview.mockImplementation(async () => {
+        state.outcome.review.status = 'completed';
+      });
+      const project = state.projects[0];
+      const before = {
+        privateSelfReview: project.privateSelfReview,
+        prAuthor: project.prAuthor,
+        securityReview: project.securityReview,
+      };
+      // The configured PR author, in another case than GitHub writes it.
+      Object.assign(project, { privateSelfReview: true, prAuthor: 'Octo-Dev', securityReview: 'off' });
+      state.outcome.review = { id: 6, jobId: id, status: 'running', headSha: null, baseRef: null };
+      state.stored = [
+        {
+          id,
+          kind: 'devchat',
+          status: 'closed',
+          repo: 'acme/shop',
+          providerId: 1,
+          model: 'claude-fable-5-1',
+          effort: 'high',
+          activity: 'review',
+          startedOnPr: 3748,
+          providerSessionId: '12345678-1234-1234-1234-123456789abd',
+          turns: 0,
+          chatStarted: false,
+          workDir: root,
+          branch: 'feature',
+          createdAt: '2026-11-13T00:00:00Z',
+        },
+      ];
+      try {
+        await initJobs();
+        const job = getJob(id);
+        job.status = 'idle';
+        sendDevMessage(id, '/code-review');
+        await vi.waitFor(() => expect(invocations).toHaveLength(1));
+        // Discovery is the provider's command, exactly, whoever opened the pull request.
+        expect(invocations[0].args.slice(0, 2)).toEqual(['-p', '/code-review high 3748']);
+        invocations[0].child.writeReview('# Review\n\nA candidate finding');
+        invocations[0].child.emit('close', 0);
+        await vi.waitFor(() => expect(invocations).toHaveLength(4));
+        const [, publish, verify, label] = invocations;
+        await vi.waitFor(() => expect(label.prompt).toBeTruthy());
+        await vi.waitFor(() => expect(completeCodeReview).toHaveBeenCalledWith(id));
+        expect(failCodeReview).not.toHaveBeenCalled();
+        expect(state.stageLog.filter((s) => s.status === 'completed').map((s) => s.stage)).toEqual([
+          'discover',
+          'publish',
+          'verify',
+          'label',
+        ]);
+        const said = job.events.map((e) => String(e.text || ''));
+        if (!privately) {
+          expect(job.codeReviewPrivate).toBeUndefined();
+          expect(publish.prompt).toContain('Create a single comment in the PR with this format');
+          expect(publish.prompt).toContain(`<!-- reviewer:code-review ${head} -->`);
+          expect(verify.prompt).toContain('Start every reply with the verdict in bold');
+          expect(label.prompt).toContain('add the `feedback-given` label');
+          expect(label.prompt).toContain('-f event=APPROVE');
+          expect(said.some((text) => text.startsWith('Private self-review'))).toBe(false);
+          return;
+        }
+        expect(job.codeReviewPrivate).toEqual({ head });
+        expect(said).toContain(
+          'Private self-review: this project keeps the review of its own pull requests off GitHub, so the findings are registered and verified here and nothing is posted until none is left to fix.',
+        );
+        expect(publish.prompt).toContain('Register the review above of acme/shop PR #3748');
+        expect(publish.prompt).toContain('Post nothing on GitHub in this step');
+        expect(publish.prompt).not.toContain('Create a single comment in the PR');
+        expect(publish.prompt).not.toContain('reviewer:code-review');
+        expect(verify.prompt).toContain('Your goal is to try to REFUTE them');
+        expect(verify.prompt).not.toContain('Start every reply with the verdict in bold');
+        // The finish rules in place of the label rules, filled for this pull request.
+        expect(label.prompt).toContain('Checked before requesting review');
+        expect(label.prompt).toContain('<!-- reviewer:self-review -->');
+        expect(label.prompt).toContain('gh pr ready 3748 --repo acme/shop --undo');
+        expect(label.prompt).not.toContain('add the `feedback-given` label');
+        expect(label.prompt).not.toContain('event=APPROVE');
+        await vi.waitFor(() => expect(job.status).toBe('idle'));
+        expect(job.error).toBeNull();
+      } finally {
+        await closeDevSession(id);
+        Object.assign(project, before);
+        home.mockRestore();
+        bin.mockRestore();
+        spawn.mockImplementation(realSpawn);
+        getProviderForJob.mockReset();
+        captureProviderAuth.mockReset();
+        githubRest.mockReset();
+        githubGraphql.mockReset();
+        completeCodeReview.mockImplementation(async () => {});
+        fs.rmSync(root, { recursive: true, force: true });
+        for (const file of ['review-summary.md', 'review-history.json'])
+          fs.rmSync(path.join(prompts, `${id}-${file}`), { force: true });
+      }
+    },
+    30_000,
+  );
+});
+
 describe('native Codex code review', () => {
   let root, id, summaryPath, completionPath, historyPath, head, invocations, home, bin, realSpawn, job;
   beforeEach(async () => {

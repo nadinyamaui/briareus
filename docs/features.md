@@ -903,6 +903,74 @@ here against stand-in provider processes, not by running a real review.
 See [PR actions and QA](../README.md#pull-request-actions-and-qa) and the
 [GitHub API reference](api-v1-reference.md#pull-requests-and-issues).
 
+### Private self-review
+
+A project can keep the code review of its own pull requests off GitHub until
+nothing is left to fix (`privateSelfReview`, off by default), for a team whose
+process has the author review their own change before asking a colleague and
+never post that review's raw output. A pull request is the project's own when it
+was opened by the project's `prAuthor`, by the GitHub account the reviewing
+session's owner linked, or by the account of the server's token; anything else
+is reviewed and published exactly as before. Which kind a review is gets decided
+as its discovery starts, like its security pass, and stays with that run on that
+head.
+
+**The same review, nothing posted.** The flow stays discover, (security,)
+publish, verify, label, on the project's provider, model and effort, inside the
+same rounds and computed into the same outcome. What changes is what reaches
+GitHub:
+
+- the publish step reconciles and registers the findings, and stores the
+  summary with `review_summary_set`, but posts no summary comment, no inline
+  comment and no reply in any thread;
+- the verification step records each verdict and its evidence, and replies
+  nowhere;
+- the last step follows the `selfReviewFinish` prompt template instead of the
+  `reviewLabels` rules. Its built-in text: while a required fix stands, post
+  nothing and turn the pull request back into a draft (unless `requires-dev-review`,
+  `feedback-given` or `feedback-implemented` shows a reviewer is already
+  engaged); once none does, post or update one collapsed comment, _Checked
+  before requesting review_, saying in the author's own words what was fixed,
+  dismissed and left optional (marked `<!-- reviewer:self-review -->`, so every
+  later round updates the same comment), mark the pull request ready and add
+  `requires-dev-review`. Whatever the template says, the step never approves,
+  submits no GitHub review, adds no label that marks the code as approved, and
+  never pastes the review onto the pull request. A project overrides the
+  template for its own hand-over (a board status, other labels).
+
+The findings, their verdicts and the summary stay readable through
+`GET /api/v1/pulls/{number}/code-reviews`.
+
+**Later rounds.** A private finding has no thread, so its verdict is kept as a
+decision under its reference (`ref:<findingRef>`), like any finding that had no
+inline comment. Such a claim would otherwise stand as owed for ever, with no
+thread anybody could resolve, so a private review may also **adopt** an earlier
+decision that has no thread (`fix` or `optional`), which an ordinary review
+cannot. Its publish step is told to adopt every earlier private `fix`, whether
+discovery reported it again or not, and the verification step rules on each at
+the new head: Fix if it still stands, Dismissed with confirmed verification and
+comments starting `Fixed since:` once the code no longer has it. That verdict is
+the claim's decision from then on, and the outcome follows it.
+
+**Fixing.** The implement-feedback action of a project with `privateSelfReview`
+is given, after its template, the required fixes that no thread carries (the
+claim, file and line, and the review's evidence) as data. It checks them like
+any other feedback, keeps them out of every comment it posts, and does not add
+`feedback-implemented` for them alone.
+
+**Migration.** `2026_11_13_120000_add_private_self_review` adds
+`projects.private_self_review`, off for every project; its way down drops it.
+
+**Not covered.** A review whose session owner, `prAuthor` and server account
+cannot be matched to the pull request's author is the ordinary, published one.
+Earlier findings that were published before a project switched this on keep
+their threads, and are adopted and answered there as before, except that a
+private review replies in none of them. The finish rules are carried out by the
+review's agent, so whether the draft, comment and label changes happened is not
+checked by the server beyond what the outcome already holds the step to. This
+was exercised against stand-in provider processes and a stand-in GitHub, not by
+running a real review.
+
 ### Risk-based human approvals
 
 A project can require that people approve a pull request before it counts as
@@ -1509,6 +1577,10 @@ These additions are present in the server revision documented here:
   only approvals it can attribute to a person for the exact reviewed revision,
   and publishes the result as the `briareus/approvals` commit status, apart
   from the review outcome. A tier can make the security pass required.
+- A project can keep the code review of its own pull requests private
+  (`privateSelfReview`): findings are registered and verified on the server
+  only, the pull request waits as a draft while a required fix stands, and one
+  collapsed summary is posted when it is handed to a human reviewer.
 
 - Slack's core inbox has live events and operator replies; eligible sessions
   can now read their project's channels, DMs and threads too.

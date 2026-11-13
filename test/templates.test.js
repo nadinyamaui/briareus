@@ -150,6 +150,35 @@ describe('code review label policy', () => {
   });
 });
 
+describe('private self-review finish', () => {
+  const rendered = renderTemplate('selfReviewFinish', {
+    REPO: 'acme/shop',
+    PR_NUMBER: 7,
+    SELF_REVIEW_ANCHOR: '<!-- reviewer:self-review -->',
+  });
+
+  it('waits as a draft while a required fix stands, and posts nothing then', () => {
+    expect(rendered).toContain('If a required fix stands');
+    expect(rendered).toContain('post nothing and change no label');
+    expect(rendered).toContain('gh pr ready 7 --repo acme/shop --undo');
+  });
+
+  it('hands over with one collapsed summary, ready and requires-dev-review, once none does', () => {
+    expect(rendered).toContain('<summary>Checked before requesting review</summary>');
+    expect(rendered).toContain('<!-- reviewer:self-review -->');
+    expect(rendered).toContain('gh pr ready 7 --repo acme/shop`');
+    expect(rendered).toContain('--add-label requires-dev-review');
+    expect(rendered).toContain('Never add `code-approved` or `feedback-given`');
+  });
+
+  it('is listed for Settings with the tokens it takes', () => {
+    const entry = templateCatalog().find((t) => t.id === 'selfReviewFinish');
+    expect(entry.vars.map((v) => v.name)).toEqual(
+      expect.arrayContaining(['REPO', 'PR_NUMBER', 'SELF_REVIEW_ANCHOR']),
+    );
+  });
+});
+
 describe('the orchestrator instructions', () => {
   it('appends nothing by default and resolves project over global', async () => {
     expect(templateText('orchestrator')).toBe('');
