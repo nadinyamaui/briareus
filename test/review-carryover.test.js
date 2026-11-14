@@ -34,8 +34,10 @@ describe('changeDigest', () => {
   it('leaves out the base lines around a hunk’s changes, and keeps those between them', () => {
     // Both branches appended to the end of a translation file: the base gained lines
     // right after the pull request's, and the change is still the same.
-    const reviewed = '@@ -4944,6 +4944,7 @@\n     "Browser": "Browser",\n     "Page opens": "Opens",\n+    "Hand off": "Hand off",\n     "Fixed amount": "Fixed amount",\n     "Percentage": "Percentage"\n }';
-    const merged = '@@ -4944,6 +4944,7 @@\n     "Date and time": "Date and time",\n     "Page opens": "Opens",\n+    "Hand off": "Hand off",\n     "Customer success": "Customer success",\n     "Sender": "Sender",\n     "Sender email": "Sender email",';
+    const reviewed =
+      '@@ -4944,6 +4944,7 @@\n     "Browser": "Browser",\n     "Page opens": "Opens",\n+    "Hand off": "Hand off",\n     "Fixed amount": "Fixed amount",\n     "Percentage": "Percentage"\n }';
+    const merged =
+      '@@ -4944,6 +4944,7 @@\n     "Date and time": "Date and time",\n     "Page opens": "Opens",\n+    "Hand off": "Hand off",\n     "Customer success": "Customer success",\n     "Sender": "Sender",\n     "Sender email": "Sender email",';
     expect(changeDigest([modified(reviewed)])).toBe(changeDigest([modified(merged)]));
 
     const between = '@@ -1,5 +1,5 @@\n a\n-b\n c\n+d\n e';
