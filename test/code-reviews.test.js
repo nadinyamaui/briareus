@@ -165,14 +165,27 @@ describe('the prompts of a review kept off GitHub', () => {
     expect(computed).toContain('**changes required**');
     expect(computed).toContain('the outcome above is incomplete, or the PR head has moved, post nothing');
     expect(computed).toContain('Outcome: changes required');
-    // A required security pass that did not pass is still reported, and posts nothing.
-    const owed = reviewLabelPrompt({
+    // The format example carries the computed outcome, not a fixed one.
+    const passed = reviewLabelPrompt({ ...label, outcome: { outcome: 'passed', reasons: [] } });
+    expect(passed).toContain('Outcome: passed');
+    expect(passed).not.toContain('Outcome: changes required');
+    // A required security pass that failed on a required fix is a complete review: it is
+    // reported, and the summary is still posted, saying so.
+    const failed = reviewLabelPrompt({
       ...label,
       securityOwed: { result: 'failed', reasons: [{ message: 'Injection in /login is a required fix' }] },
     });
-    expect(owed).toContain('Briareus does not read that pass as passed: it failed on a required fix');
-    expect(owed).toContain('- Injection in /login is a required fix');
-    expect(owed).toContain('whatever the findings say: post no comment, and report this.');
+    expect(failed).toContain('Briareus does not read that pass as passed: it failed on a required fix');
+    expect(failed).toContain('- Injection in /login is a required fix');
+    expect(failed).toContain(
+      'whatever the findings say: post the summary comment below all the same, saying in it that the required security pass failed on a required fix, and report this.',
+    );
+    expect(failed).not.toContain('post no comment');
+    // One that did not run or did not settle posts nothing.
+    for (const result of ['not_run', 'pending', 'incomplete']) {
+      const owed = reviewLabelPrompt({ ...label, securityOwed: { result, reasons: [] } });
+      expect(owed).toContain('whatever the findings say: post no comment, and report this.');
+    }
   });
 });
 

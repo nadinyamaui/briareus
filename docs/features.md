@@ -123,9 +123,9 @@ steps (discovery, any security pass, publication, verification and the last
 step) and posts only one comment: the last step, once every finding has its
 verdict, writes a short summary with the findings and their verdicts, the
 dismissed ones each with why (and the outcome, for a project that enforces
-it), and posts it on the pull request. Nothing else goes there: no inline comments, verdict
-replies or resolved threads, no labels and no approval, and no comment at all
-when the review is incomplete or the head moved. Its findings, verdicts and
+it), and posts it on the pull request. Nothing else goes there: no inline
+comments, verdict replies or resolved threads, no labels and no approval, and no
+comment at all when the review is incomplete or the head moved. Its findings, verdicts and
 summary are kept on the server and read through
 `GET /api/v1/pulls/{number}/code-reviews`. The setting is read when a review
 starts, so a review already running finishes the way it began.
@@ -134,9 +134,10 @@ Later rounds still reconcile with what earlier reviews decided: a required or
 optional fix kept without a thread is adopted by its reference and ruled on
 again at the new head, so a fix that was made is dismissed as fixed instead of
 standing as owed. The implement-feedback action is given the required fixes
-still owed as data, since they have no thread on the pull request. A project that also has `enforceReviewOutcome` still
-gets its `briareus/code-review` commit status, whose description then names how
-many reasons an incomplete review has but not what they say.
+still owed as data, since they have no thread on the pull request. A project
+that also has `enforceReviewOutcome` still gets its `briareus/code-review`
+commit status, whose description then names how many reasons an incomplete
+review has but not what they say.
 
 ### Earlier review decisions
 
