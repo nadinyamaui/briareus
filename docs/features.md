@@ -511,9 +511,11 @@ provider, model and effort are used as configured.
   review carries over to it instead of turning stale. The change is what the
   pull request adds to its merge base, compared file by file through GitHub's
   comparison: same status, name and hunks, hunk line numbers aside, and the
-  context lines before a hunk's first change and after its last aside too (the
-  base gaining lines right beside the change, as two branches appending to one
-  translation file, leaves it the same change); context between two changes of
+  context lines after a hunk's last change and before its first aside too (the
+  base gaining lines right after the change, as two branches appending to one
+  translation file, leaves it the same change), but for the line right above
+  the first change, which is compared as where the change is (the same lines
+  moved under another line are another change); context between two changes of
   a hunk is compared; a file without a patch by its blob; 300 or more
   files, or a review whose round has no recorded merge base, never carries
   over. Whatever the review concluded carries over with it, and the outcome

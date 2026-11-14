@@ -35,19 +35,36 @@ describe('changeDigest', () => {
     // Both branches appended to the end of a translation file: the base gained lines
     // right after the pull request's, and the change is still the same.
     const reviewed =
-      '@@ -4944,6 +4944,7 @@\n     "Browser": "Browser",\n     "Page opens": "Opens",\n+    "Hand off": "Hand off",\n     "Fixed amount": "Fixed amount",\n     "Percentage": "Percentage"\n }';
+      '@@ -4944,5 +4944,6 @@\n     "Browser": "Browser",\n     "Page opens": "Opens",\n+    "Hand off": "Hand off",\n     "Fixed amount": "Fixed amount",\n     "Percentage": "Percentage"\n }';
     const merged =
-      '@@ -4944,6 +4944,7 @@\n     "Date and time": "Date and time",\n     "Page opens": "Opens",\n+    "Hand off": "Hand off",\n     "Customer success": "Customer success",\n     "Sender": "Sender",\n     "Sender email": "Sender email",';
+      '@@ -4944,5 +4944,6 @@\n     "Date and time": "Date and time",\n     "Page opens": "Opens",\n+    "Hand off": "Hand off",\n     "Customer success": "Customer success",\n     "Sender": "Sender",\n     "Sender email": "Sender email",';
     expect(changeDigest([modified(reviewed)])).toBe(changeDigest([modified(merged)]));
 
-    const between = '@@ -1,5 +1,5 @@\n a\n-b\n c\n+d\n e';
+    const between = '@@ -1,6 +1,6 @@\n z\n a\n-b\n c\n+d\n e';
     const digest = changeDigest([modified(between)]);
     expect(changeDigest([modified(between.replace(' c', ' C'))])).not.toBe(digest);
-    expect(changeDigest([modified(between.replace(' a', ' A').replace(' e', ' E'))])).toBe(digest);
+    expect(changeDigest([modified(between.replace(' z', ' Z').replace(' e', ' E'))])).toBe(digest);
+    // The line right above the change is where it is, and stays compared.
+    expect(changeDigest([modified(between.replace(' a', ' A'))])).not.toBe(digest);
     // A missing newline at the end is part of the change it follows.
     expect(changeDigest([modified('@@ -1 +1 @@\n-a\n+b\n\\ No newline at end of file')])).not.toBe(
       changeDigest([modified('@@ -1 +1 @@\n-a\n+b')]),
     );
+  });
+
+  it('is another change when the same lines move under another line of the file', () => {
+    const reviewed =
+      '@@ -20,6 +20,7 @@ function isTestUser(user) {\n   if (debug) {\n+    return true;\n   }';
+    const moved = '@@ -40,6 +40,7 @@ function isAdmin(token) {\n   if (!token) {\n+    return true;\n   }';
+    expect(changeDigest([modified(moved)])).not.toBe(changeDigest([modified(reviewed)]));
+    // A change at the top of the file follows no line, and moved down it follows one.
+    const top = '@@ -1,3 +1,4 @@\n+// @ts-check\n a\n b\n c';
+    const lower = '@@ -4,6 +4,7 @@\n c\n+// @ts-check\n d';
+    expect(changeDigest([modified(lower)])).not.toBe(changeDigest([modified(top)]));
+    // Each hunk is compared on its own: the same changes in other hunks are another change.
+    const twoHunks = '@@ -1,3 +1,3 @@\n a\n-b\n+B\n@@ -20,3 +20,3 @@\n x\n-y\n+Y';
+    const swapped = '@@ -1,3 +1,3 @@\n a\n-y\n+Y\n@@ -20,3 +20,3 @@\n x\n-b\n+B';
+    expect(changeDigest([modified(swapped)])).not.toBe(changeDigest([modified(twoHunks)]));
   });
 
   it('compares a file without a patch by the blob it leaves', () => {
