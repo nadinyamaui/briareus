@@ -5646,7 +5646,7 @@ describe('native Codex code review', () => {
     expect(failCodeReview).not.toHaveBeenCalled();
   });
 
-  it('posts nothing to GitHub for a project that keeps its reviews off it, decided as the review starts', async () => {
+  it('posts only the summary comment for a project that keeps its reviews off GitHub, decided as the review starts', async () => {
     state.projects[0].postReviewToGithub = false;
     sendDevMessage(id, '/review');
     await vi.waitFor(() => expect(invocations).toHaveLength(1));
@@ -5655,7 +5655,7 @@ describe('native Codex code review', () => {
     fs.writeFileSync(summaryPath, 'A candidate finding');
     finishReview(invocations[0]);
     await vi.waitFor(() => expect(invocations).toHaveLength(2));
-    const quiet = 'This project keeps its code reviews off GitHub: post nothing on the pull request.';
+    const quiet = 'post nothing on the pull request in this step.';
     const publish = invocations[1].child.prompt;
     expect(publish).toContain('Record the review above of acme/shop PR #77');
     expect(publish).toContain(quiet);
@@ -5671,7 +5671,9 @@ describe('native Codex code review', () => {
     finishTurn(invocations[2]);
     await vi.waitFor(() => expect(invocations).toHaveLength(4));
     const label = invocations[3].child.prompt;
-    expect(label).toContain(quiet);
+    expect(label).toContain(
+      "post the review's summary on acme/shop PR #77 as a single comment, and nothing else",
+    );
     expect(label).not.toContain('event=APPROVE');
     expect(label).not.toContain('feedback-given');
     finishTurn(invocations[3]);

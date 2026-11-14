@@ -83,9 +83,7 @@ describe('the prompts of a review kept off GitHub', () => {
     for (const write of WRITES)
       if (typeof write === 'string') expect(prompt).not.toContain(write);
       else expect(prompt).not.toMatch(write);
-    expect(prompt).toContain(
-      'This project keeps its code reviews off GitHub: post nothing on the pull request.',
-    );
+    expect(prompt).toContain('post nothing on the pull request in this step.');
   };
 
   it('posts by default, exactly as before', () => {
@@ -131,26 +129,47 @@ describe('the prompts of a review kept off GitHub', () => {
     expect(prompt).toContain('Briareus computes this review');
   });
 
-  it('finishes with a report and no labels or approval', () => {
+  it('finishes with a single summary comment and no labels or approval', () => {
     const label = { labels: 'CUSTOM LABEL POLICY', repo: 'acme/shop', prNumber: 7, head, post: false };
     const prompt = reviewLabelPrompt(label);
-    writesNothing(prompt);
     expect(prompt).toContain(
       `Discovery, publication and independent verification must all have succeeded for ${head}`,
     );
-    expect(prompt).toContain('Add or remove no label and submit no review or approval');
+    // A review that is not whole posts nothing at all.
+    expect(prompt).toContain('or the PR head has moved, post nothing, and say so and why.');
+    // Otherwise one comment, the summary, and nothing else.
+    expect(prompt).toContain(
+      "post the review's summary on acme/shop PR #7 as a single comment, and nothing else",
+    );
+    expect(prompt).toContain('add or remove no label and submit no review or approval');
+    expect(prompt).toContain('# Code Review');
+    expect(prompt).toContain('- **Fix** Title (path:line)');
+    expect(prompt).toContain('Dismissed findings are only counted');
+    expect(prompt).toContain('`gh api repos/acme/shop/issues/7/comments -F body=@<file>`');
+    expect(prompt).toContain(`<!-- reviewer:code-review ${head} -->`);
+    expect(prompt).toContain('update that comment');
+    for (const write of [
+      'inline review comment',
+      'resolveReviewThread',
+      'event=APPROVE',
+      'Label the PR',
+      'CUSTOM LABEL POLICY',
+    ])
+      expect(prompt).not.toContain(write);
+    expect(prompt).not.toMatch(/gh api repos\/[^ ]*\/pulls\/[^ ]*\/(comments|reviews)/);
+    expect(prompt).not.toContain('Outcome:');
     const computed = reviewLabelPrompt({ ...label, outcome: { outcome: 'changes_required', reasons: [] } });
-    writesNothing(computed);
     expect(computed).toContain('**changes required**');
-    // A required security pass that did not pass is still reported, as for a posting review.
+    expect(computed).toContain('the outcome above is incomplete, or the PR head has moved, post nothing');
+    expect(computed).toContain('Outcome: changes required');
+    // A required security pass that did not pass is still reported, and posts nothing.
     const owed = reviewLabelPrompt({
       ...label,
       securityOwed: { result: 'failed', reasons: [{ message: 'Injection in /login is a required fix' }] },
     });
-    writesNothing(owed);
     expect(owed).toContain('Briareus does not read that pass as passed: it failed on a required fix');
     expect(owed).toContain('- Injection in /login is a required fix');
-    expect(owed).toContain('whatever the findings say: report this.');
+    expect(owed).toContain('whatever the findings say: post no comment, and report this.');
   });
 });
 

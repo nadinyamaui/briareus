@@ -36,7 +36,7 @@ describe('privateFixesNote', () => {
     ]);
     expect(note).toContain('- Cart total ignores the coupon (lib/cart.js:44): Reproduced with a 10% coupon.');
     expect(note).not.toContain('Only optional');
-    expect(note).toContain('leave them out of every comment you post');
+    expect(note).toContain('a fix for those alone earns no `feedback-implemented` label');
   });
 
   it('lists a fix a later review ruled on a thread GitHub shows otherwise', () => {

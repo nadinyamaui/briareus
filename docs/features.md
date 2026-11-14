@@ -118,10 +118,14 @@ and rerunning a review in the same session resets it to `pending`.
 ### Keeping reviews off GitHub
 
 `postReviewToGithub` on the project, on by default, says whether a code review
-writes to GitHub at all. Switched off, the review runs the same steps
-(discovery, any security pass, publication, verification and the last step)
-and posts nothing: no summary comment, inline comments, verdict replies or
-resolved threads, no labels and no approval. Its findings, verdicts and
+posts its findings on the pull request. Switched off, the review runs the same
+steps (discovery, any security pass, publication, verification and the last
+step) and posts only one comment: the last step, once every finding has its
+verdict, writes a short summary with the findings that are not dismissed and
+their verdicts (and the outcome, for a project that enforces it), and posts
+it on the pull request. Nothing else goes there: no inline comments, verdict
+replies or resolved threads, no labels and no approval, and no comment at all
+when the review is incomplete or the head moved. Its findings, verdicts and
 summary are kept on the server and read through
 `GET /api/v1/pulls/{number}/code-reviews`. The setting is read when a review
 starts, so a review already running finishes the way it began.
@@ -130,8 +134,7 @@ Later rounds still reconcile with what earlier reviews decided: a required or
 optional fix kept without a thread is adopted by its reference and ruled on
 again at the new head, so a fix that was made is dismissed as fixed instead of
 standing as owed. The implement-feedback action is given the required fixes
-still owed as data, since they are not on the pull request, and keeps them out
-of the comments it posts. A project that also has `enforceReviewOutcome` still
+still owed as data, since they have no thread on the pull request. A project that also has `enforceReviewOutcome` still
 gets its `briareus/code-review` commit status, whose description then names how
 many reasons an incomplete review has but not what they say.
 
@@ -1530,7 +1533,8 @@ These additions are present in the server revision documented here:
   evidence, apart from whether the session finished; a project can publish it
   as the `briareus/code-review` commit status (`enforceReviewOutcome`).
 - A project can keep its code reviews off GitHub (`postReviewToGithub` off):
-  the same review runs and its findings and verdicts stay on the server.
+  the same review runs, its findings and verdicts stay on the server, and only
+  a short summary of the verified findings is posted as a single PR comment.
 - A project can have every code review run a security pass (`securityReview`:
   off, advisory or required): a second discovery whose findings are published
   and verified with the rest, with a separately tracked security result and a
