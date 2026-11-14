@@ -3,7 +3,12 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('../lib/db.js', () => ({ listCodeReviewDecisions: vi.fn() }));
 
 import { listCodeReviewDecisions } from '../lib/db.js';
-import { postsReviewToGithub, privateFeedbackNote, privateFixesNote } from '../lib/review-private.js';
+import {
+  postsReviewToGithub,
+  privateFeedbackNote,
+  privateFixesNote,
+  reviewKeptPrivate,
+} from '../lib/review-private.js';
 
 const at = (minute) => new Date(Date.UTC(2026, 10, 13, 12, minute)).toISOString();
 const decision = (over) => ({
@@ -25,6 +30,23 @@ describe('postsReviewToGithub', () => {
     expect(postsReviewToGithub(null)).toBe(true);
     expect(postsReviewToGithub({ postReviewToGithub: true })).toBe(true);
     expect(postsReviewToGithub({ postReviewToGithub: false })).toBe(false);
+  });
+});
+
+describe('reviewKeptPrivate', () => {
+  const off = { postReviewToGithub: false };
+  it('keeps only the reviewing account’s own pull requests off GitHub', () => {
+    expect(reviewKeptPrivate(off, 'nadin', 'nadin')).toBe(true);
+    expect(reviewKeptPrivate(off, 'Nadin', 'nadin')).toBe(true);
+    expect(reviewKeptPrivate(off, 'sergio', 'nadin')).toBe(false);
+  });
+  it('posts whoever opened it when the project posts', () => {
+    expect(reviewKeptPrivate({}, 'nadin', 'nadin')).toBe(false);
+    expect(reviewKeptPrivate({ postReviewToGithub: true }, null, null)).toBe(false);
+  });
+  it('stays private when the author or the account cannot be read', () => {
+    expect(reviewKeptPrivate(off, null, 'nadin')).toBe(true);
+    expect(reviewKeptPrivate(off, 'sergio', null)).toBe(true);
   });
 });
 

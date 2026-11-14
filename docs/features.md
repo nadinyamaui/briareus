@@ -118,7 +118,12 @@ and rerunning a review in the same session resets it to `pending`.
 ### Keeping reviews off GitHub
 
 `postReviewToGithub` on the project, on by default, says whether a code review
-posts its findings on the pull request. Switched off, the review runs the same
+posts its findings on the pull request. Switched off, it applies only to the
+pull requests the reviewing account opened itself (the session owner's
+connected GitHub account, otherwise the server's): anyone else's pull request
+is reviewed in the open as before, labels and approval included, and one whose
+author or account cannot be read stays private. On its own pull request the
+review runs the same
 steps (discovery, any security pass, publication, verification and the last
 step) and posts only one comment: the last step, once every finding has its
 verdict, writes a short summary with the findings and their verdicts, the
@@ -1539,8 +1544,9 @@ These additions are present in the server revision documented here:
   passed) is computed by the server from recorded stages, findings and
   evidence, apart from whether the session finished; a project can publish it
   as the `briareus/code-review` commit status (`enforceReviewOutcome`).
-- A project can keep its code reviews off GitHub (`postReviewToGithub` off):
-  the same review runs, its findings and verdicts stay on the server, and only
+- A project can keep code reviews of its own pull requests off GitHub
+  (`postReviewToGithub` off; others' are still reviewed in the open): the same
+  review runs, its findings and verdicts stay on the server, and only
   a short summary of the verified findings, dismissed ones with why, is posted
   as a single PR comment.
 - A project can have every code review run a security pass (`securityReview`:

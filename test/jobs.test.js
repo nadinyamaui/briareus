@@ -5695,6 +5695,48 @@ describe('native Codex code review', () => {
     await vi.waitFor(() => expect(job.status).toBe('idle'));
   });
 
+  it('reviews someone else’s pull request in the open when the project keeps its reviews off GitHub', async () => {
+    state.projects[0].postReviewToGithub = false;
+    const pull = (await githubRest.getMockImplementation()?.()) ?? null;
+    githubRest.mockImplementation(async (cfg, method, url) =>
+      url === '/user'
+        ? { ok: true, json: async () => ({ login: 'Briareus-Bot', id: 7 }) }
+        : { ok: true, json: async () => ({ ...(await pull?.json()), user: { login: 'octo-author' } }) },
+    );
+    sendDevMessage(id, '/review');
+    await vi.waitFor(() => expect(invocations).toHaveLength(1));
+    fs.writeFileSync(summaryPath, 'A candidate finding');
+    finishReview(invocations[0]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(2));
+    expect(job.codeReviewPrivate).toBeUndefined();
+    expect(invocations[1].child.prompt).toContain('Create a single comment in the PR');
+    finishTurn(invocations[1]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(3));
+    finishTurn(invocations[2]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(4));
+    expect(invocations[3].child.prompt).toContain('add the `feedback-given` label');
+    finishTurn(invocations[3]);
+    await vi.waitFor(() => expect(job.status).toBe('idle'));
+    // The reviewing account's own pull request stays private.
+    githubRest.mockImplementation(async (cfg, method, url) =>
+      url === '/user'
+        ? { ok: true, json: async () => ({ login: 'briareus-bot', id: 7 }) }
+        : { ok: true, json: async () => ({ ...(await pull?.json()), user: { login: 'briareus-bot' } }) },
+    );
+    sendDevMessage(id, '/review');
+    await vi.waitFor(() => expect(invocations).toHaveLength(5));
+    fs.writeFileSync(summaryPath, 'A candidate finding');
+    finishReview(invocations[4]);
+    await vi.waitFor(() => expect(invocations).toHaveLength(6));
+    expect(job.codeReviewPrivate).toBe(true);
+    for (const n of [5, 6, 7]) {
+      finishTurn(invocations[n]);
+      if (n < 7) await vi.waitFor(() => expect(invocations).toHaveLength(n + 2));
+    }
+    await vi.waitFor(() => expect(job.status).toBe('idle'));
+    state.projects[0].postReviewToGithub = true;
+  });
+
   it('tells native review that database verification is blocked when none was provisioned', async () => {
     sendDevMessage(id, '/review');
     await vi.waitFor(() => expect(invocations).toHaveLength(1));
