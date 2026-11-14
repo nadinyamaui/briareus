@@ -121,9 +121,9 @@ and rerunning a review in the same session resets it to `pending`.
 posts its findings on the pull request. Switched off, the review runs the same
 steps (discovery, any security pass, publication, verification and the last
 step) and posts only one comment: the last step, once every finding has its
-verdict, writes a short summary with the findings that are not dismissed and
-their verdicts (and the outcome, for a project that enforces it), and posts
-it on the pull request. Nothing else goes there: no inline comments, verdict
+verdict, writes a short summary with the findings and their verdicts, the
+dismissed ones each with why (and the outcome, for a project that enforces
+it), and posts it on the pull request. Nothing else goes there: no inline comments, verdict
 replies or resolved threads, no labels and no approval, and no comment at all
 when the review is incomplete or the head moved. Its findings, verdicts and
 summary are kept on the server and read through
@@ -1534,7 +1534,8 @@ These additions are present in the server revision documented here:
   as the `briareus/code-review` commit status (`enforceReviewOutcome`).
 - A project can keep its code reviews off GitHub (`postReviewToGithub` off):
   the same review runs, its findings and verdicts stay on the server, and only
-  a short summary of the verified findings is posted as a single PR comment.
+  a short summary of the verified findings, dismissed ones with why, is posted
+  as a single PR comment.
 - A project can have every code review run a security pass (`securityReview`:
   off, advisory or required): a second discovery whose findings are published
   and verified with the rest, with a separately tracked security result and a

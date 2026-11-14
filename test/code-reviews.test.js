@@ -144,7 +144,10 @@ describe('the prompts of a review kept off GitHub', () => {
     expect(prompt).toContain('add or remove no label and submit no review or approval');
     expect(prompt).toContain('# Code Review');
     expect(prompt).toContain('- **Fix** Title (path:line)');
-    expect(prompt).toContain('Dismissed findings are only counted');
+    // Dismissed findings are listed too, each with why.
+    expect(prompt).toContain('<details><summary>⚪ Dismissed findings</summary>');
+    expect(prompt).toContain('- Title (path:line): Dismissed because');
+    expect(prompt).toContain('each Dismissed finding with the reason it was dismissed');
     expect(prompt).toContain('`gh api repos/acme/shop/issues/7/comments -F body=@<file>`');
     expect(prompt).toContain(`<!-- reviewer:code-review ${head} -->`);
     expect(prompt).toContain('update that comment');
