@@ -634,8 +634,27 @@ describe('what is unresolved', () => {
     expect([...settledClaims(rows)]).toEqual([]);
   });
 
+  it('settles a threadless duplicate whose title carries a native review priority tag', () => {
+    // As stored before titles lost the tag: Codex's native discovery registered one copy
+    // and the Spec reviewer, which published the thread, the other.
+    const rows = [
+      decision({
+        findingRef: 'spec',
+        threadId: 'T1',
+        title: 'Normalize dates',
+        verdict: 'fix',
+        resolved: true,
+      }),
+      decision({ findingRef: 'native', title: '[P2] Normalize dates', verdict: 'fix' }),
+    ];
+    expect(unresolvedWork(rows)).toEqual({ fix: [], unverified: [] });
+    expect([...settledClaims(rows)].sort()).toEqual(['native', 'spec']);
+  });
+
   it.each([
     { title: 'Another defect' },
+    { title: '[P2] Another defect' },
+    { title: 'Normalize dates [P2]' },
     { filePath: 'src/other.js' },
     { line: 13 },
     { raisedSha: sha('b') },
