@@ -373,6 +373,17 @@ describe('findingFields', () => {
     });
   });
 
+  it('drops the priority tag a native Codex review puts before a title', () => {
+    expect(findingFields({ severity: 'medium', title: ' [P2] Clear totals ' }).title).toBe('Clear totals');
+    expect(findingFields({ severity: 'high', title: '[p0]Clear totals' }).title).toBe('Clear totals');
+    // Only a leading tag is one; a bracket elsewhere is part of the title.
+    expect(findingFields({ severity: 'low', title: 'Handle [P2] markers' }).title).toBe(
+      'Handle [P2] markers',
+    );
+    expect(() => findingFields({ severity: 'low', title: '[P1]' })).toThrow(/title is required/);
+    expect(findingFields({ title: '[P3] Renamed' }, { partial: true })).toEqual({ title: 'Renamed' });
+  });
+
   it('checks the optional fields it is given', () => {
     const base = { severity: 'low', shouldFix: 'optional', title: 't' };
     expect(
